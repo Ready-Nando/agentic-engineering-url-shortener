@@ -55,6 +55,26 @@ class EngineeringSummaryTest {
     }
 
     @Test
+    void dataFlowsAreLabelledAsTypeLevelOverApproximations() {
+        Map<String, Object> entry = Map.of("method", "GET", "path", "/{code}", "handlerType", "com.example.RedirectController");
+        List<String> path = List.of("com.example.RedirectController", "com.example.LinkService", "com.example.LinkRepository");
+        publish(ArtifactKeys.IMPACT_ANALYSIS, Map.of("seeds", List.of("LinkService"), "rationale", "redirects change",
+                "analysis", Map.of("components", List.of(), "endpoints", List.of(entry), "tables", List.of("short_link"), "tests", List.of(),
+                        "dataFlows", List.of(
+                                Map.of("entry", entry, "path", path, "table", "short_link", "access", "READ"),
+                                Map.of("entry", entry, "path", path, "table", "short_link", "access", "WRITE")))));
+
+        String summary = EngineeringSummary.render(run, events);
+
+        String impact = summary.substring(summary.indexOf("## 3. Codebase impact analysis"), summary.indexOf("## 4. Design decisions"));
+        assertThat(impact).contains("- **Data flows** (type-level over-approximations: they follow type references, not calls, "
+                        + "so a flow may list READ and WRITE for a table that a reachable repository touches; "
+                        + "a GET endpoint is not necessarily writing):\n"
+                        + "  - GET /{code} -> RedirectController, LinkService, LinkRepository -> `short_link` (READ)\n"
+                        + "  - GET /{code} -> RedirectController, LinkService, LinkRepository -> `short_link` (WRITE)\n");
+    }
+
+    @Test
     void workspaceComparisonAndAggregateFindingsAreOptional() {
         publish(ArtifactKeys.VERIFICATION_REPORT, Map.of("mode", "STATIC", "degraded", true, "outcome", "NOT_BUILT", "testsRun", 0));
         publish(ArtifactKeys.SECURITY_REVIEW, Map.of("status", "CLEAN", "approvedFindings", List.of()));

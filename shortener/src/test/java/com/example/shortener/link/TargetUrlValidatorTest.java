@@ -30,6 +30,22 @@ class TargetUrlValidatorTest {
         assertThatCode(() -> validator.validate(url)).doesNotThrowAnyException();
     }
 
+    // The documented posture: the service only redirects and never fetches a target, so internal addresses are no
+    // server-side request forgery risk here and are not rejected.
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "http://127.0.0.1/admin",
+            "http://localhost:9000/",
+            "http://10.0.0.8/",
+            "http://192.168.1.1/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]/",
+            "http://[fe80::1]/"
+    })
+    void acceptsPrivateLoopbackAndLinkLocalTargets(String url) {
+        assertThatCode(() -> validator.validate(url)).doesNotThrowAnyException();
+    }
+
     @ParameterizedTest
     @NullAndEmptySource
     @ValueSource(strings = {

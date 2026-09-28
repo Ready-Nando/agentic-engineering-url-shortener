@@ -1,0 +1,57 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+response:
+  summary: "Document the lifetime setting and the behaviour of expired links"
+  rationale: "No field is added to the API, so openapi.yaml only describes the redirect's new 404 case. The README gains the setting, the link-not-found case, a design note on expiry and the updated limitation."
+  declaredRisk: LOW
+  changes:
+    - op: EDIT
+      path: src/main/resources/static/openapi.yaml
+      find: |2
+                Answers 302 Found with `Cache-Control: no-store` (not 301) so every click reaches the service
+                and disabled links stop working immediately. Each GET is recorded as a click with only the
+                referrer host; recording failures never fail the redirect. HEAD requests are not counted.
+      replace: |2
+                Answers 302 Found with `Cache-Control: no-store` (not 301) so every click reaches the service
+                and disabled links stop working immediately. Each GET is recorded as a click with only the
+                referrer host; recording failures never fail the redirect. HEAD requests are not counted.
+
+                Every link expires once it is older than the configured lifetime (`shortener.link-lifetime`,
+                365 days by default), including links created before expiry existed. An expired link answers
+                404 `link-not-found` exactly like an unknown code and records no click; it can still be read,
+                with its statistics, through `/api/v1/links/{code}`.
+    - op: EDIT
+      path: README.md
+      find: |2
+        | `shortener.stats.max-days`                | `90`                    | Largest accepted statistics window                   |
+      replace: |2
+        | `shortener.stats.max-days`                | `90`                    | Largest accepted statistics window                   |
+        | `shortener.link-lifetime`                 | `365d`                  | Links stop redirecting this long after creation      |
+    - op: EDIT
+      path: README.md
+      find: |2
+        | `link-not-found`          | 404    | Unknown code                                                   |
+      replace: |2
+        | `link-not-found`          | 404    | Unknown code, or a redirect to an expired link                 |
+    - op: EDIT
+      path: README.md
+      find: |2-
+        **Persistence.**
+      replace: |2-
+        **Expiry.** Every link expires `shortener.link-lifetime` (365 days by default) after its `createdAt`,
+        including links created before expiry existed. Following an expired link answers 404 `link-not-found`,
+        exactly like a code that never existed, records no click and increments
+        `shortener.redirects{outcome=expired}`; this also applies to a disabled link once it has expired. Expiry is
+        derived from `createdAt` on every redirect instead of being stored, so it needs no migration or background
+        job, and changing the setting changes the lifetime of every link at once. The link and its statistics
+        remain readable through the API, and its code is never handed out again.
+
+        **Persistence.**
+    - op: EDIT
+      path: README.md
+      find: |2
+        - Links do not expire, visitors are not de-duplicated, and there is no abuse reporting.
+      replace: |2
+        - Visitors are not de-duplicated, and there is no abuse reporting.
+        - Every link has the same lifetime; it cannot be set or extended per link. Lowering
+          `shortener.link-lifetime` expires every link older than the new value immediately.

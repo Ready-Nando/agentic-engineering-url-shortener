@@ -25,6 +25,8 @@ public enum EventType {
     POLICY_EVALUATED,
     CHANGESET_APPLIED,
     CHANGESET_ROLLED_BACK,
+    /** A change set whose rollback had already happened (fully or partly) before a restart, reconciled with the disk. */
+    CHANGESET_RECOVERED,
     HUMAN_INPUT_REQUESTED,
     HUMAN_INPUT_RECEIVED,
     HUMAN_INPUT_CANCELLED,

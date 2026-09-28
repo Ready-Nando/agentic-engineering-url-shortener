@@ -14,8 +14,10 @@ import com.example.sdlc.plan.WorkflowPlan;
 /**
  * Turns a planner's proposal into the next plan version, enforcing structure and governance the planner
  * cannot opt out of: known capabilities only; change scopes limited to what each capability may touch; every
- * change verified and security reviewed; workspace-wide checks ordered after all changes; a single release
- * assessment that depends on everything; bounded retries; mandatory gates; default fallbacks only.
+ * verification task lists every change task, verification tasks run one after another, and every changing
+ * plan is security and compatibility reviewed;
+ * workspace-wide checks ordered after all changes; a single release assessment that depends on everything;
+ * bounded retries; mandatory gates; default fallbacks only.
  */
 public final class PlanValidator {
 
@@ -148,7 +150,8 @@ public final class PlanValidator {
         if (changeTasks.isEmpty()) {
             return;
         }
-        for (Capability.Role required : List.of(Capability.Role.VERIFICATION, Capability.Role.SECURITY_REVIEW)) {
+        for (Capability.Role required : List.of(Capability.Role.VERIFICATION, Capability.Role.SECURITY_REVIEW,
+                Capability.Role.COMPATIBILITY_REVIEW)) {
             if (withRole(planned, required).isEmpty()) {
                 violations.add("plan changes code but has no " + required + " task");
             }
@@ -162,14 +165,33 @@ public final class PlanValidator {
                 }
             }
         }
-        Set<String> changeIds = changeTasks.stream().map(TaskSpec::id).collect(Collectors.toSet());
-        for (TaskSpec verify : withRole(planned, Capability.Role.VERIFICATION)) {
+        Set<String> changeIds = changeTasks.stream().map(TaskSpec::id).collect(Collectors.toCollection(LinkedHashSet::new));
+        // A build verifier runs the whole suite on the whole tree, so it meets every change's defects, and it can
+        // only send back the tasks it lists: a partial list turns a repairable defect into a safe stop.
+        List<TaskSpec> verifiers = withRole(planned, Capability.Role.VERIFICATION);
+        for (TaskSpec verify : verifiers) {
             if (verify.verifies().isEmpty()) {
                 violations.add("'" + verify.id() + "' must list the change tasks it verifies");
+                continue;
             }
             for (String target : verify.verifies()) {
                 if (!changeIds.contains(target)) {
                     violations.add("'" + verify.id() + "' verifies '" + target + "', which is not a change task of this plan");
+                }
+            }
+            List<String> missing = changeIds.stream().filter(id -> !verify.verifies().contains(id)).toList();
+            if (!missing.isEmpty()) {
+                violations.add("'" + verify.id() + "' must verify every change task; missing " + missing);
+            }
+        }
+        // Verifiers share the workspace and its build output directory; two at once would corrupt each other's run.
+        for (int i = 0; i < verifiers.size(); i++) {
+            for (int j = i + 1; j < verifiers.size(); j++) {
+                String first = verifiers.get(i).id();
+                String second = verifiers.get(j).id();
+                if (!graph.ancestors(first).contains(second) && !graph.ancestors(second).contains(first)) {
+                    violations.add("verification tasks '" + first + "' and '" + second
+                            + "' could run in parallel; make one depend on the other");
                 }
             }
         }

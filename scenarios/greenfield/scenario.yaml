@@ -24,9 +24,12 @@ reviewer:
     - match: { kind: GATE_APPROVAL, task: design, generation: 2 }
       decision: APPROVE
       comment: "Configurable rule approved: defaults unchanged, and the floor of 2 reporters keeps a single reporter powerless."
-    - match: { kind: CHANGE_APPROVAL, task: impl-store, rules: [CC-02] }
+    - match: { kind: CHANGE_APPROVAL, task: impl-store, rules: [CC-02, CC-09] }
       decision: APPROVE
-      comment: "New table only, no change to existing data; reporter_hash is pseudonymous."
+      comment: "New table only, no change to existing data; reporter_hash is pseudonymous. The configuration only adds the reporter key, read from the environment with no default."
+    - match: { kind: CHANGE_APPROVAL, task: impl-api, rules: [SEC-06] }
+      decision: APPROVE
+      comment: "One new public POST endpoint: the request body is validated, the reporter address is only passed on to be hashed, and nothing about the link or its reports is echoed back."
     - match: { kind: GATE_APPROVAL, task: release, generation: 1 }
       decision: REQUEST_CHANGES
       target: design

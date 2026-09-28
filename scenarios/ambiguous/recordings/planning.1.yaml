@@ -69,6 +69,7 @@ response:
       verifies:
         - impl-storage
         - impl-lifecycle
+        - docs
         - tests
     - id: security
       title: Security and compliance review of the aggregate change

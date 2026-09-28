@@ -16,7 +16,10 @@ import java.util.stream.StreamSupport;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import com.example.sdlc.artifact.Artifact;
 import com.example.sdlc.artifact.ArtifactKeys;
 import com.example.sdlc.workspace.Workspace;
 
@@ -52,13 +55,35 @@ class ReleaseAssessmentHandlerTest {
     }
 
     private JsonNode assess(VerificationReport verification) {
+        return assess(verification, changes("impl", 1, "src/main/java/demo/Feature.java"));
+    }
+
+    /** Assessment with passing build and security evidence plus the given change sets, reviews and design artifacts. */
+    private JsonNode assess(VerificationReport verification, Artifact... evidence) {
         VerificationReport baseline = build(10, List.of(APP_TEST, CODEC_TEST), workspace.baselineHash());
-        return output(new ReleaseAssessmentHandler().execute(context("release", "assess-release", workspace, visible(
-                changes("impl", 1, "src/main/java/demo/Feature.java"),
+        Map<String, Artifact> visible = visible(
                 artifact(ArtifactKeys.BASELINE_VERIFICATION, baseline, "baseline"),
                 artifact(ArtifactKeys.VERIFICATION_REPORT, verification, "verify"),
-                artifact(ArtifactKeys.SECURITY_REVIEW, Map.of("status", "CLEAN", "approvedFindings", List.of()), "security")))),
+                artifact(ArtifactKeys.SECURITY_REVIEW, Map.of("status", "CLEAN", "approvedFindings", List.of()), "security"));
+        visible.putAll(visible(evidence));
+        return output(new ReleaseAssessmentHandler().execute(context("release", "assess-release", workspace, visible)),
                 ArtifactKeys.RELEASE_READINESS);
+    }
+
+    private JsonNode assessWithEvidence(Artifact... evidence) {
+        return assess(build(12, List.of(APP_TEST, CODEC_TEST), workspace.contentHash()), evidence);
+    }
+
+    /** A design contract whose author labels every operation as unchanged. */
+    private static Artifact contractClaimingNoApiChange() {
+        return artifact(ArtifactKeys.API_CONTRACT, Map.of("operations", List.of(
+                Map.of("method", "GET", "path", "/api/v1/links/{code}", "change", "UNCHANGED"),
+                Map.of("method", "POST", "path", "/api/v1/links", "change", "UNCHANGED"))), "design");
+    }
+
+    private static Artifact apiReview(String status, String... addedOperations) {
+        return artifact(ArtifactKeys.API_COMPATIBILITY, Map.of("status", status, "addedOperations", List.of(addedOperations),
+                "breakingChanges", List.of(), "undocumented", List.of(), "unimplemented", List.of()), "api-review");
     }
 
     private static JsonNode item(JsonNode readiness, String id) {
@@ -121,5 +146,63 @@ class ReleaseAssessmentHandlerTest {
         assertThat(item(readiness, "tests-executed-and-passing").path("evidence").asString()).contains("STATIC NOT_BUILT").contains("DEGRADED");
         assertThat(item(readiness, "verified-tree-is-final").path("passed").asBoolean()).isTrue();
         assertThat(readiness.path("ready").asBoolean()).isFalse();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"src/main/java/demo/api/LinkResponse.java", "src/main/java/demo/web/ApiExceptionHandler.java",
+            "src/main/java/demo/LinkController.java", "src/main/resources/static/openapi.yaml"})
+    void apiRelevantChangeWithoutAnApiReviewIsNotReadyWhateverTheDesignLabelsSay(String apiPath) {
+        JsonNode readiness = assessWithEvidence(contractClaimingNoApiChange(),
+                changes("impl", 1, "src/main/java/demo/Feature.java", apiPath));
+
+        assertThat(failedItems(readiness)).containsExactly("api-compatible-and-documented");
+        assertThat(item(readiness, "api-compatible-and-documented").path("evidence").asString())
+                .isEqualTo("not reviewed, but changed [" + apiPath + "]");
+        assertThat(readiness.path("ready").asBoolean()).isFalse();
+    }
+
+    @Test
+    void withoutAnApiReviewOnlyChangesThatCannotTouchTheApiPass() {
+        JsonNode readiness = assessWithEvidence(contractClaimingNoApiChange(),
+                changes("impl", 1, "src/main/java/demo/Feature.java", "src/main/java/demo/apiary/Hive.java",
+                        "src/main/resources/application.yml"),
+                changes("tests", 2, "src/test/java/demo/api/LinkApiTest.java"));
+
+        assertThat(item(readiness, "api-compatible-and-documented").path("passed").asBoolean()).isTrue();
+        assertThat(item(readiness, "api-compatible-and-documented").path("evidence").asString())
+                .isEqualTo("not reviewed; no API-relevant file changed");
+        assertThat(failedItems(readiness)).isEmpty();
+        assertThat(readiness.path("ready").asBoolean()).isTrue();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"BREAKING", "INCOMPLETE"})
+    void apiReviewThatIsNotCompatibleIsNotReady(String status) {
+        JsonNode readiness = assessWithEvidence(contractClaimingNoApiChange(), apiReview(status),
+                changes("impl", 1, "src/main/java/demo/Feature.java"));
+
+        assertThat(failedItems(readiness)).containsExactly("api-compatible-and-documented");
+        assertThat(item(readiness, "api-compatible-and-documented").path("evidence").asString()).startsWith(status + ", added");
+        assertThat(readiness.path("ready").asBoolean()).isFalse();
+    }
+
+    @Test
+    void operationsTheApiReviewFoundAddedMustBeDocumentedWhateverTheDesignLabelsSay() {
+        // Pins the rule that labels cannot waive what the review measured. In a run the review only finds added
+        // operations in a changed OpenAPI document, which itself counts as documentation, so this evidence is
+        // assembled by hand rather than produced by the API review.
+        Artifact review = apiReview("COMPATIBLE", "POST /api/v1/links/{code}/reports");
+
+        JsonNode undocumented = assessWithEvidence(contractClaimingNoApiChange(), review,
+                changes("impl", 1, "src/main/java/demo/Feature.java"));
+        JsonNode documented = assessWithEvidence(contractClaimingNoApiChange(), review,
+                changes("impl", 1, "src/main/java/demo/Feature.java"), changes("docs", 2, "README.md"));
+
+        assertThat(failedItems(undocumented)).containsExactly("documentation-updated");
+        assertThat(item(undocumented, "documentation-updated").path("evidence").asString())
+                .isEqualTo("API changed but no documentation change");
+        assertThat(undocumented.path("ready").asBoolean()).isFalse();
+        assertThat(failedItems(documented)).isEmpty();
+        assertThat(documented.path("ready").asBoolean()).isTrue();
     }
 }

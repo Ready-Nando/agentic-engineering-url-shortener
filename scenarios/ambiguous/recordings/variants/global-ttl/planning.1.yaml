@@ -1,0 +1,80 @@
+# Recorded plan proposal for the global-lifetime direction. Unlike the per-link direction there is no storage
+# task and no API change: one implementation task adds the setting and enforces it. The engine validates the
+# proposal, adds mandatory gates and prerequisite edges, and only then turns it into the executable graph.
+response:
+  rationale: "A single implementation task adds shortener.link-lifetime (ShortenerProperties, application.yml) and enforces it in LinkService; there is no migration and no API change. Documentation needs only the design and runs alongside implementation. The test task follows the implementation and also updates the existing tests that construct ShortenerProperties, whose constructor gains the lifetime. Build, security review and API review run in parallel before sign-off."
+  tasks:
+    - id: design
+      title: Design the configured link lifetime
+      capability: design
+      goal: "Decide where the lifetime is configured, how it applies to existing links and what an expired link answers"
+      maxAttempts: 2
+    - id: impl-lifetime
+      title: Configure one lifetime for every link and stop redirecting expired links
+      capability: implement
+      dependsOn:
+        - design
+      goal: "Add shortener.link-lifetime to ShortenerProperties and application.yml; LinkService answers link-not-found for links older than it"
+      inputs:
+        - decision/D-1
+        - decision/D-2
+        - decision/D-3
+        - decision/D-4
+      scope:
+        - src/main/java/com/example/shortener/config/ShortenerProperties.java
+        - src/main/java/com/example/shortener/link/LinkService.java
+        - src/main/resources/application.yml
+      maxAttempts: 3
+    - id: docs
+      title: Document the lifetime setting and the expired-link behaviour
+      capability: document
+      dependsOn:
+        - design
+      inputs:
+        - design/api-contract
+        - decision/D-1
+        - decision/D-2
+        - decision/D-3
+      scope:
+        - src/main/resources/static/openapi.yaml
+        - README.md
+    - id: tests
+      title: Tests for every acceptance criterion
+      capability: author-tests
+      dependsOn:
+        - impl-lifetime
+      inputs:
+        - design/api-contract
+        - decision/D-1
+        - decision/D-3
+      scope:
+        - "src/test/java/**"
+    - id: verify
+      title: Run the full test suite against the changed workspace
+      capability: verify-build
+      dependsOn:
+        - tests
+        - docs
+      verifies:
+        - impl-lifetime
+        - docs
+        - tests
+    - id: security
+      title: Security and compliance review of the aggregate change
+      capability: review-security
+      dependsOn:
+        - tests
+        - docs
+    - id: api-review
+      title: API compatibility and documentation review
+      capability: review-api
+      dependsOn:
+        - tests
+        - docs
+    - id: release
+      title: Release readiness and sign-off
+      capability: assess-release
+      dependsOn:
+        - verify
+        - security
+        - api-review

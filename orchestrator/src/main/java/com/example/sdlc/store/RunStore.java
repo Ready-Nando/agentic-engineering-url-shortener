@@ -9,18 +9,25 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import com.example.sdlc.Json;
+import com.example.sdlc.artifact.Artifact;
 import com.example.sdlc.engine.ExecutionEvent;
 import com.example.sdlc.engine.WorkflowRun;
+import com.example.sdlc.human.HumanRequest;
 
 /**
  * File-based persistence: {@code run.json} is an atomically replaced snapshot of the run state and
- * {@code events.jsonl} an append-only audit log, one JSON event per line.
+ * {@code events.jsonl} an append-only audit log, one JSON event per line. The complete diff behind each change
+ * approval request is also written as {@code approvals/<request-id>.patch}, for the reviewer and the audit.
  */
 public final class RunStore {
+
+    private static final Pattern REQUEST_ID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]*");
 
     private final Path root;
 
@@ -36,11 +43,38 @@ public final class RunStore {
         Path directory = directory(run.id());
         try {
             Files.createDirectories(directory);
+            // Before the snapshot, so a saved request never points at a diff that is not on disk yet.
+            writeApprovalPatches(run, directory);
             Path temp = Files.createTempFile(directory, "run", ".json.part");
             Files.writeString(temp, Json.MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(run), StandardCharsets.UTF_8);
             Files.move(temp, directory.resolve("run.json"), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
+        }
+    }
+
+    /**
+     * The change-review artifact is the source of truth: a patch file that differs from it is replaced. Request ids
+     * are not stable across a crash, so a reissued id may find the patch of a different, never-persisted proposal.
+     */
+    private static void writeApprovalPatches(WorkflowRun run, Path directory) throws IOException {
+        for (Artifact artifact : run.artifacts().all()) {
+            if (!artifact.key().startsWith(HumanRequest.CHANGE_REVIEW_PREFIX) || !artifact.kind().equals("change-diff")) {
+                continue;
+            }
+            String requestId = artifact.key().substring(HumanRequest.CHANGE_REVIEW_PREFIX.length());
+            if (!REQUEST_ID.matcher(requestId).matches()) {
+                continue;
+            }
+            Path patch = directory.resolve(HumanRequest.approvalPatchPath(requestId));
+            byte[] diff = artifact.content().path("diff").asString().getBytes(StandardCharsets.UTF_8);
+            if (Files.isRegularFile(patch) && Arrays.equals(Files.readAllBytes(patch), diff)) {
+                continue;
+            }
+            Files.createDirectories(patch.getParent());
+            Path temp = Files.createTempFile(patch.getParent(), "approval", ".patch.part");
+            Files.write(temp, diff);
+            Files.move(temp, patch, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         }
     }
 

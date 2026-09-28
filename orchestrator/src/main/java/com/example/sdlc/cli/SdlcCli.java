@@ -2,7 +2,10 @@ package com.example.sdlc.cli;
 
 import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.charset.CharacterCodingException;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
@@ -12,6 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.Callable;
 
 import com.example.sdlc.Json;
@@ -42,6 +46,7 @@ import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
 import picocli.CommandLine.ParentCommand;
 
+import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JsonNode;
 
 @Command(name = "sdlc", mixinStandardHelpOptions = true, version = "sdlc-orchestrator 0.1.0",
@@ -61,6 +66,7 @@ public final class SdlcCli implements Runnable {
     Path runsDir;
 
     private final PrintStream out = System.out;
+    private final PrintStream err = System.err;
     private final Style style = Style.detect();
 
     public static void main(String[] args) {
@@ -85,8 +91,43 @@ public final class SdlcCli implements Runnable {
                 "cannot find the repository root (a directory with scenarios/ and shortener/); pass --repo");
     }
 
+    Path runsDirectory() {
+        return runsDir != null ? runsDir.toAbsolutePath() : repository().resolve("runs");
+    }
+
     RunStore store() {
-        return new RunStore(runsDir != null ? runsDir.toAbsolutePath() : repository().resolve("runs"));
+        return new RunStore(runsDirectory());
+    }
+
+    /** How to invoke this CLI again in a copy-and-paste hint, keeping a non-default runs directory. */
+    String sdlcCommand() {
+        return "./sdlc" + (runsDir == null ? "" : " --runs-dir " + shellArgument(displayPath(runsDir)));
+    }
+
+    /**
+     * True, after saying so on stderr, when {@code runId} names no persisted run; the command then ends with a
+     * usage error instead of a stack trace (or, for events and metrics, silently empty output). Only listed run
+     * ids count, so an id with path segments never reaches outside the runs directory.
+     */
+    boolean unknownRun(String runId) {
+        if (store().runIds().contains(runId)) {
+            return false;
+        }
+        err.println("no run '" + runId + "' in " + runsDirectory().normalize() + "; list runs with " + sdlcCommand() + " runs");
+        return true;
+    }
+
+    /** Ends a command with a one-line usage error, before it changed anything. */
+    int usageError(String message) {
+        err.println(message);
+        return CommandLine.ExitCode.USAGE;
+    }
+
+    /** A mistake in a command's input found while validating it; reported by {@link #usageError}. */
+    private static final class UsageError extends RuntimeException {
+        UsageError(String message) {
+            super(message, null, false, false);
+        }
     }
 
     ScenarioRunner runner() {
@@ -178,7 +219,7 @@ public final class SdlcCli implements Runnable {
             String scenarioDir = run.setting("scenarioDirectory", "scenarios/" + run.scenarioId());
             boolean clarification = run.pendingHumanRequests().stream().anyMatch(r -> r.kind() == HumanRequest.Kind.CLARIFICATION);
             out.println();
-            String sdlc = "./sdlc" + (runsDir == null ? "" : " --runs-dir " + shellArgument(displayPath(runsDir)));
+            String sdlc = sdlcCommand();
             out.println("  Resume with, for example:");
             out.println(clarification
                     ? "    " + sdlc + " resume " + run.id() + " --answers " + scenarioDir + "/answers.yaml"
@@ -299,9 +340,20 @@ public final class SdlcCli implements Runnable {
         boolean verbose;
 
         @Override
-        public Integer call() throws IOException {
+        public Integer call() {
+            if (cli.unknownRun(runId)) {
+                return CommandLine.ExitCode.USAGE;
+            }
             RunStore store = cli.store();
             WorkflowRun run = store.load(runId);
+            List<HumanRequest> clarifications = run.pendingHumanRequests().stream()
+                    .filter(r -> r.kind() == HumanRequest.Kind.CLARIFICATION).toList();
+            // Answers nobody asked for must not vanish silently, e.g. contradicting ones for a run that was
+            // already clarified and has acted on its answers (checked first, so also for a finished run).
+            if (answers != null && clarifications.isEmpty()) {
+                return cli.usageError("--answers: run " + runId + " has no pending clarification ("
+                        + (run.status().isFinal() ? "it already finished: " + run.status() : pending(run)) + "); nothing was recorded");
+            }
             if (run.status().isFinal()) {
                 cli.out.println("run " + runId + " already finished: " + run.status());
                 return run.status() == RunStatus.COMPLETED ? 0 : EXIT_HALTED;
@@ -315,19 +367,18 @@ public final class SdlcCli implements Runnable {
             ScenarioRunner.ReviewerMode mode = reviewerMode(run);
             String who = reviewerName != null ? reviewerName : System.getProperty("user.name", "reviewer");
             if (answers != null) {
-                JsonNode file = Json.YAML.readTree(Files.readString(answers));
-                Map<String, String> values = new LinkedHashMap<>();
-                file.path("answers").properties().forEach(e -> values.put(e.getKey(), e.getValue().asString()));
+                JsonNode file;
+                Map<String, String> values;
+                try {
+                    file = readAnswersFile();
+                    values = answerValues(file.path("answers"), clarifications);
+                } catch (UsageError e) {
+                    return cli.usageError(e.getMessage());
+                }
                 // An explicit --as wins over the name written in the answers file.
                 String answeredBy = reviewerName != null ? reviewerName : file.path("reviewer").asString(who);
-                for (HumanRequest request : run.pendingHumanRequests()) {
-                    if (request.kind() == HumanRequest.Kind.CLARIFICATION) {
-                        List<String> missing = request.questions().stream().map(HumanRequest.Question::id).filter(id -> !values.containsKey(id)).toList();
-                        if (!missing.isEmpty()) {
-                            throw new CommandLine.ParameterException(new CommandLine(this), "answers file does not answer " + missing);
-                        }
-                        answer(run, request.id(), HumanResponse.answer(answeredBy, values));
-                    }
+                for (HumanRequest request : clarifications) {
+                    answer(run, request.id(), HumanResponse.answer(answeredBy, values));
                 }
             }
             approve.forEach(id -> answer(run, id, HumanResponse.approve(who, comment)));
@@ -373,6 +424,74 @@ public final class SdlcCli implements Runnable {
             return requested;
         }
 
+        private static String pending(WorkflowRun run) {
+            return run.pendingHumanRequests().isEmpty() ? "nothing is pending" : "pending: " + String.join(", ",
+                    run.pendingHumanRequests().stream().map(r -> r.id() + " " + r.kind()).toList());
+        }
+
+        private JsonNode readAnswersFile() {
+            String text;
+            try {
+                text = Files.readString(answers);
+            } catch (IOException e) {
+                throw new UsageError("cannot read answers file " + answers + ": " + switch (e) {
+                    case NoSuchFileException missing -> "no such file";
+                    case AccessDeniedException denied -> "permission denied";
+                    case CharacterCodingException encoding -> "not UTF-8 text";
+                    default -> e.getMessage();
+                });
+            }
+            try {
+                return Json.YAML.readTree(text);
+            } catch (JacksonException e) {
+                throw new UsageError("answers file " + answers + " is not valid YAML" + (e.getLocation() == null ? ""
+                        : " (line " + e.getLocation().getLineNr() + ", column " + e.getLocation().getColumnNr() + ")"));
+            }
+        }
+
+        /**
+         * The file's answers, checked against the pending clarifications before anything is recorded: one value
+         * for every question asked and none for a question nobody asked, and one of the offered options where a
+         * question allows no free text. An offered option the recordings do not cover is still accepted; the
+         * reasoning step then stops the run safely.
+         */
+        private Map<String, String> answerValues(JsonNode given, List<HumanRequest> clarifications) {
+            if (!given.isObject()) {
+                throw new UsageError("answers file " + answers + " has no 'answers' mapping (answers: {<question id>: <answer>})");
+            }
+            List<HumanRequest.Question> questions = clarifications.stream().flatMap(r -> r.questions().stream()).toList();
+            List<String> asked = questions.stream().map(HumanRequest.Question::id).distinct().toList();
+            Map<String, String> values = new LinkedHashMap<>();
+            for (Map.Entry<String, JsonNode> entry : given.properties()) {
+                String id = entry.getKey();
+                JsonNode value = entry.getValue();
+                if (!asked.contains(id)) {
+                    throw new UsageError("answers file " + answers + " answers " + id + ", which the pending clarification does not ask "
+                            + "(it asks " + asked + ")");
+                }
+                if (!value.isValueNode()) {
+                    throw new UsageError("answer " + id + " in " + answers + " must be a single value, not a " + (value.isArray() ? "list" : "mapping"));
+                }
+                // An empty answer answers nothing; it is reported with the questions left unanswered.
+                if (!value.isNull() && !value.asString().isBlank()) {
+                    values.put(id, value.asString());
+                }
+            }
+            List<String> missing = asked.stream().filter(id -> !values.containsKey(id)).toList();
+            if (!missing.isEmpty()) {
+                throw new UsageError("answers file " + answers + " does not answer " + missing);
+            }
+            for (HumanRequest.Question question : questions) {
+                List<String> offered = question.options().stream().map(HumanRequest.Option::id).toList();
+                String value = values.get(question.id());
+                if (!question.freeTextAllowed() && !offered.contains(value)) {
+                    throw new UsageError("answer " + question.id() + " = " + Json.MAPPER.writeValueAsString(value) + " in " + answers
+                            + " is not one of the offered options " + offered);
+                }
+            }
+            return values;
+        }
+
         private void answer(WorkflowRun run, String requestId, HumanResponse response) {
             try {
                 run.answer(requestId, response, Instant.now());
@@ -398,6 +517,9 @@ public final class SdlcCli implements Runnable {
 
         @Override
         public Integer call() {
+            if (cli.unknownRun(runId)) {
+                return CommandLine.ExitCode.USAGE;
+            }
             WorkflowRun run = cli.store().load(runId);
             if (run.status().isFinal()) {
                 cli.out.println("run " + runId + " already finished: " + run.status());
@@ -418,6 +540,9 @@ public final class SdlcCli implements Runnable {
 
         @Override
         public Integer call() {
+            if (cli.unknownRun(runId)) {
+                return CommandLine.ExitCode.USAGE;
+            }
             cli.printStatus(cli.store().load(runId), true);
             return 0;
         }
@@ -436,14 +561,27 @@ public final class SdlcCli implements Runnable {
 
         @Override
         public Integer call() {
+            if (cli.unknownRun(runId)) {
+                return CommandLine.ExitCode.USAGE;
+            }
             WorkflowRun run = cli.store().load(runId);
             Lineage lineage = new Lineage(run.artifacts());
             if (artifact == null) {
                 run.artifacts().all().forEach(a -> cli.out.println(Lineage.describe(a)));
                 return 0;
             }
-            Artifact target = lineage.resolve(artifact).orElseThrow(() ->
-                    new CommandLine.ParameterException(new CommandLine(this), "no artifact " + artifact));
+            // Lineage reads "@v<n>" as an int, so anything else after "@v" is reported here instead of crashing.
+            int at = artifact.lastIndexOf("@v");
+            Optional<Artifact> resolved = at > 0 && !artifact.substring(at + 2).matches("\\d{1,9}")
+                    ? Optional.empty() : lineage.resolve(artifact);
+            if (resolved.isEmpty()) {
+                String key = at > 0 ? artifact.substring(0, at) : artifact;
+                int versions = run.artifacts().history(key).size();
+                return cli.usageError(versions == 0
+                        ? "no artifact '" + key + "' in run " + runId + "; list them with " + cli.sdlcCommand() + " lineage " + runId
+                        : "no artifact version '" + artifact + "'; " + key + " has v1" + (versions == 1 ? "" : " to v" + versions));
+            }
+            Artifact target = resolved.get();
             cli.out.println(cli.style.bold("Derived from (upstream):"));
             lineage.upstream(target).forEach(l -> cli.out.println("  " + l));
             cli.out.println(cli.style.bold("Derived from it (downstream):"));
@@ -475,6 +613,9 @@ public final class SdlcCli implements Runnable {
 
         @Override
         public Integer call() {
+            if (cli.unknownRun(runId)) {
+                return CommandLine.ExitCode.USAGE;
+            }
             for (ExecutionEvent e : cli.store().events(runId)) {
                 if ((type != null && !e.type().name().equalsIgnoreCase(type)) || (task != null && !task.equals(e.taskId()))) {
                     continue;
@@ -499,6 +640,9 @@ public final class SdlcCli implements Runnable {
         public Integer call() {
             RunStore store = cli.store();
             if (runId != null) {
+                if (cli.unknownRun(runId)) {
+                    return CommandLine.ExitCode.USAGE;
+                }
                 cli.out.println(Json.MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(ReliabilityMetrics.of(store.events(runId))));
                 return 0;
             }

@@ -19,9 +19,9 @@ reviewer:
     - match: { kind: GATE_APPROVAL, task: design }
       decision: APPROVE
       comment: "Keyed daily HMAC is acceptable to privacy; additive nullable column approved in principle."
-    - match: { kind: CHANGE_APPROVAL, task: impl-capture, rules: [CC-02, SEC-04] }
+    - match: { kind: CHANGE_APPROVAL, task: impl-capture, rules: [CC-02, SEC-04, CC-09] }
       decision: APPROVE
-      comment: "Additive, nullable column; no backfill; safe for existing rows. The redirect handler only passes the request to the recorder; its routing and validation are unchanged."
+      comment: "Additive, nullable column; no backfill; safe for existing rows. The redirect handler only passes the request to the recorder; its routing and validation are unchanged. The configuration only adds the fingerprint key, read from the environment with no default."
     - match: { kind: CHANGE_APPROVAL, task: impl-stats, rules: [SEC-04] }
       decision: APPROVE
       comment: "Only the stats response gains the additive uniqueVisitors field; request handling and validation are unchanged."

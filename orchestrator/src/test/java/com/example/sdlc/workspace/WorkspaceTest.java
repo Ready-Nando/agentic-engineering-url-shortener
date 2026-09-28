@@ -2,12 +2,17 @@ package com.example.sdlc.workspace;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.junit.jupiter.api.condition.OS.WINDOWS;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -272,5 +277,164 @@ class WorkspaceTest {
                 .contains("-    int a;").contains("+    int b;")
                 .contains("new file mode 100644").contains("--- /dev/null").contains("+++ b/module/src/main/java/demo/New.java")
                 .contains("deleted file mode 100644");
+    }
+
+    // ---------------------------------------------------------------- byte-faithful diffs
+
+    /** Before- and after-images (null: absent) whose differences String.lines() would hide or blur. */
+    private static final Map<String, String[]> FAITHFUL_CASES = faithfulCases();
+
+    private static Map<String, String[]> faithfulCases() {
+        Map<String, String[]> cases = new LinkedHashMap<>();
+        cases.put("crlf-to-lf.txt", new String[] {"a\r\nb\r\n", "a\nb\n"});
+        cases.put("lf-to-crlf.txt", new String[] {"a\nb\n", "a\r\nb\r\n"});
+        cases.put("newline-added.txt", new String[] {"a\nb", "a\nb\n"});
+        cases.put("newline-removed.txt", new String[] {"a\nb\n", "a\nb"});
+        cases.put("unterminated-context.txt", new String[] {"a\nb\nc", "A\nb\nc"});
+        cases.put("far-from-the-end.txt", new String[] {"1\n2\n3\n4\n5\n6\n7\n8\n9", "1\nTWO\n3\n4\n5\n6\n7\n8\n9"});
+        cases.put("created-unterminated.txt", new String[] {null, "x\ny"});
+        cases.put("created-empty.txt", new String[] {null, ""});
+        cases.put("deleted-unterminated.txt", new String[] {"a\nb", null});
+        cases.put("deleted.txt", new String[] {"a\r\n", null});
+        return cases;
+    }
+
+    private static List<FileDelta> faithfulDeltas() {
+        return FAITHFUL_CASES.entrySet().stream().map(e -> new FileDelta(e.getValue()[0] == null ? FileChange.Op.CREATE
+                : e.getValue()[1] == null ? FileChange.Op.DELETE : FileChange.Op.EDIT, e.getKey(), e.getValue()[0], e.getValue()[1])).toList();
+    }
+
+    @Test
+    void approvalDiffReproducesTheExactAfterImageBytes() {
+        String diff = Workspace.unifiedDiff(faithfulDeltas(), "");
+
+        Map<String, String> before = new LinkedHashMap<>();
+        Map<String, String> expected = new LinkedHashMap<>();
+        FAITHFUL_CASES.forEach((path, images) -> {
+            before.put(path, images[0]);
+            expected.put(path, images[1]);
+        });
+        assertThat(applyExactly(diff, before)).isEqualTo(expected);
+        assertThat(diff).contains("-a\r\n-b\r\n+a\n+b\n", "-b\n\\ No newline at end of file\n+b\n");
+        assertThat(diff.substring(diff.indexOf("diff --git a/far-from-the-end.txt"), diff.indexOf("diff --git a/created-unterminated.txt")))
+                .as("an unterminated last line outside every hunk is not mentioned").doesNotContain("No newline");
+    }
+
+    @Test
+    void outcomeDiffOfTheWorkspaceIsByteFaithfulToo() throws Exception {
+        Files.writeString(workspace.root().resolve(APP), "class App {\r\n    int a;\r\n}");
+        Files.writeString(workspace.root().resolve(CONTROLLER), "class LinkController {}");
+
+        String diff = workspace.unifiedDiff("");
+
+        Map<String, String> before = new LinkedHashMap<>();
+        before.put(APP, workspace.readBaseline(APP).orElseThrow());
+        before.put(CONTROLLER, workspace.readBaseline(CONTROLLER).orElseThrow());
+        assertThat(applyExactly(diff, before)).isEqualTo(Map.of(APP, workspace.read(APP).orElseThrow(),
+                CONTROLLER, workspace.read(CONTROLLER).orElseThrow()));
+    }
+
+    @Test
+    void gitAppliesTheApprovalDiffToTheExactAfterImageBytes() throws Exception {
+        Path repo = Files.createDirectories(temp.resolve("git-apply"));
+        for (Map.Entry<String, String[]> file : FAITHFUL_CASES.entrySet()) {
+            if (file.getValue()[0] != null) {
+                Files.writeString(repo.resolve(file.getKey()), file.getValue()[0]);
+            }
+        }
+        Path patch = temp.resolve("approval.patch");
+        Files.writeString(patch, Workspace.unifiedDiff(faithfulDeltas(), ""));
+        Process git;
+        try {
+            git = new ProcessBuilder("git", "-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "apply",
+                    "--whitespace=nowarn", patch.toString()).directory(repo.toFile()).redirectErrorStream(true).start();
+        } catch (java.io.IOException e) {
+            assumeTrue(false, "git is not available");
+            return;
+        }
+        String output = new String(git.getInputStream().readAllBytes());
+        assertThat(git.waitFor()).as(output).isZero();
+
+        for (Map.Entry<String, String[]> file : FAITHFUL_CASES.entrySet()) {
+            Path applied = repo.resolve(file.getKey());
+            if (file.getValue()[1] == null) {
+                assertThat(applied).as(file.getKey()).doesNotExist();
+            } else {
+                assertThat(Files.readString(applied)).as(file.getKey()).isEqualTo(file.getValue()[1]);
+            }
+        }
+    }
+
+    private static final Pattern HUNK = Pattern.compile("@@ -(\\d+)(?:,(\\d+))? \\+\\d+(?:,\\d+)? @@.*");
+
+    /**
+     * Applies each file section of a unified diff to its before-image (null: absent), byte for byte: lines are
+     * split on '\n' only and "\ No newline at end of file" drops the preceding line's terminator.
+     */
+    private static Map<String, String> applyExactly(String diff, Map<String, String> before) {
+        List<String> lines = new ArrayList<>(List.of(diff.split("\n", -1)));
+        assertThat(lines.removeLast()).as("diff ends with a newline").isEmpty();
+        Map<String, String> after = new LinkedHashMap<>();
+        int i = 0;
+        while (i < lines.size()) {
+            String header = lines.get(i++);
+            assertThat(header).startsWith("diff --git ");
+            String path = header.substring(header.indexOf(" b/") + 3);
+            boolean deleted = false;
+            while (i < lines.size() && !lines.get(i).startsWith("@@") && !lines.get(i).startsWith("diff --git ")) {
+                deleted |= lines.get(i++).startsWith("deleted file mode");
+            }
+            List<String> source = terminatedLines(before.get(path));
+            List<String> result = new ArrayList<>();
+            int pos = 0;
+            while (i < lines.size() && lines.get(i).startsWith("@@")) {
+                Matcher hunk = HUNK.matcher(lines.get(i++));
+                assertThat(hunk.matches()).isTrue();
+                int oldStart = Integer.parseInt(hunk.group(1));
+                int start = source.isEmpty() ? 0 : oldStart - 1;
+                result.addAll(source.subList(pos, start));
+                pos = start;
+                while (i < lines.size() && !lines.get(i).startsWith("@@") && !lines.get(i).startsWith("diff --git ")) {
+                    String line = lines.get(i++);
+                    boolean unterminated = i < lines.size() && lines.get(i).equals("\\ No newline at end of file");
+                    if (unterminated) {
+                        i++;
+                    }
+                    String text = line.substring(1) + (unterminated ? "" : "\n");
+                    switch (line.charAt(0)) {
+                        case ' ' -> {
+                            assertThat(source.get(pos++)).isEqualTo(text);
+                            result.add(text);
+                        }
+                        case '-' -> assertThat(source.get(pos++)).isEqualTo(text);
+                        case '+' -> result.add(text);
+                        default -> throw new AssertionError("unexpected diff line in " + path + ": " + line);
+                    }
+                }
+            }
+            result.addAll(source.subList(pos, source.size()));
+            if (deleted) {
+                assertThat(result).as(path + " fully removed").isEmpty();
+            }
+            after.put(path, deleted ? null : String.join("", result));
+        }
+        return after;
+    }
+
+    /** Lines with their terminators, so joining them gives back the exact content. */
+    private static List<String> terminatedLines(String content) {
+        List<String> lines = new ArrayList<>();
+        if (content == null) {
+            return lines;
+        }
+        int start = 0;
+        for (int end = content.indexOf('\n'); end >= 0; end = content.indexOf('\n', start)) {
+            lines.add(content.substring(start, end + 1));
+            start = end + 1;
+        }
+        if (start < content.length()) {
+            lines.add(content.substring(start));
+        }
+        return lines;
     }
 }

@@ -18,7 +18,6 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 @RestController
 @RequestMapping("/api/v1/links")
@@ -41,10 +40,9 @@ public class LinkController {
             @RequestHeader(name = IDEMPOTENCY_KEY_HEADER, required = false) @Nullable String idempotencyKey) {
         CreateLinkResult result = linkService.create(
                 new CreateLinkCommand(request.url(), request.alias(), idempotencyKey));
-        URI location = ServletUriComponentsBuilder.fromCurrentContextPath()
-                .path("/api/v1/links/{code}")
-                .buildAndExpand(result.link().code())
-                .toUri();
+        // Built like shortUrl from the configured public origin, never from the request: its Host and forwarded headers
+        // are client-controlled unless a trusted proxy rewrites them. Codes are URL-safe, so nothing is re-encoded.
+        URI location = URI.create(properties.shortUrl("api/v1/links/" + result.link().code()));
         LinkResponse body = LinkResponse.from(result.link(), properties);
         if (result.replayed()) {
             return ResponseEntity.ok()

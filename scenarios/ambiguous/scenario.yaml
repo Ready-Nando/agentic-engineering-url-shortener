@@ -6,9 +6,12 @@ description: |
   expired links, but states a high-impact assumption as settled and copies the vague wording into an
   acceptance criterion; the requirement-quality gate turns both into questions of its own. The run
   pauses for the product owner once the independent discovery work (codebase scan, baseline build) is
-  done. Resuming with answers.yaml re-analyses the requirement and continues through design sign-off,
-  migration approval, implementation, the real test suite, reviews and release sign-off, without
-  repeating the discovery work.
+  done. Two answer files are recorded, and the answers steer everything after the pause:
+  answers.yaml (optional per-link expiry, 410, existing links unaffected) leads to a migration, API
+  changes and two implementation tasks; answers-global-ttl.yaml (one configured lifetime, 404,
+  retroactive) leads to a configuration setting, a high-impact design sign-off and one implementation
+  task. Both continue through the real test suite, reviews and release sign-off without repeating the
+  discovery work.
 targetModule: shortener
 requirement: |
   Short links should expire. Expired links should be handled appropriately.
@@ -19,13 +22,16 @@ reviewer:
   decisions:
     - match: { kind: GATE_APPROVAL, task: design }
       decision: APPROVE
-      comment: "Additive nullable expires_at without backfill: existing links keep never expiring, as the product owner decided."
+      comment: "The design follows the product owner's answers on the expiry model, on existing links and on the response for expired links."
     - match: { kind: CHANGE_APPROVAL, task: impl-storage, rules: [CC-02] }
       decision: APPROVE
       comment: "ADD COLUMN only, nullable, no default and no backfill; safe for existing rows."
     - match: { kind: CHANGE_APPROVAL, task: impl-lifecycle, rules: [SEC-04] }
       decision: APPROVE
       comment: "The create API gains an optional expiresAt validated by the service; one new 400 mapping for invalid-expiry; link-gone keeps its status and type and is retitled 'Link gone' because it now also covers expired links."
+    - match: { kind: CHANGE_APPROVAL, task: impl-lifetime, rules: [CC-09] }
+      decision: APPROVE
+      comment: "application.yml only gains shortener.link-lifetime: 365d, the documented default; no other setting changes."
     - match: { kind: GATE_APPROVAL, task: release }
       decision: APPROVE
       comment: "Evidence reviewed: tests, acceptance coverage, security and API checks are green."

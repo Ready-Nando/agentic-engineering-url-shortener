@@ -8,13 +8,17 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
 
+import com.example.sdlc.Json;
 import com.example.sdlc.artifact.Artifact;
 import com.example.sdlc.gates.StandardGates;
 import com.example.sdlc.human.HumanGateway;
@@ -220,5 +224,59 @@ final class EngineHarness {
             executions.computeIfAbsent(context.task().id(), k -> new AtomicInteger()).incrementAndGet();
             return delegate.execute(context);
         };
+    }
+
+    // ---------------------------------------------------------------- persistence helpers
+
+    RunStatus execute(WorkflowRun run, Consumer<WorkflowRun> checkpoint) {
+        if (log == null) {
+            log = new EventLog(run.id(), Clock.systemUTC(), List.of());
+        }
+        return engine().execute(run, workspace, log, checkpoint);
+    }
+
+    /** Human-initiated safe stop through a fresh engine, as {@code sdlc cancel} does. */
+    RunStatus stop(WorkflowRun run, Consumer<WorkflowRun> checkpoint, String reason) {
+        return engine().stop(run, workspace, log, checkpoint, reason);
+    }
+
+    /** Serialises the run exactly as the run store persists it. */
+    static String snapshot(WorkflowRun run) {
+        return Json.MAPPER.writeValueAsString(run);
+    }
+
+    static WorkflowRun restore(String snapshot) {
+        return Json.MAPPER.readValue(snapshot, WorkflowRun.class);
+    }
+
+    /**
+     * A checkpoint consumer that keeps every persisted snapshot together with the number of events logged when it
+     * was taken, so a test can tell which snapshot a restart right after a given event would resume from.
+     */
+    final class Snapshots implements Consumer<WorkflowRun> {
+
+        record Taken(int events, String json) {
+            WorkflowRun restore() {
+                return EngineHarness.restore(json);
+            }
+        }
+
+        final List<Taken> taken = new CopyOnWriteArrayList<>();
+
+        @Override
+        public void accept(WorkflowRun run) {
+            taken.add(new Taken(log.events().size(), snapshot(run)));
+        }
+
+        /** The latest snapshot a process that stopped right after event {@code seq} would resume from. */
+        Taken latestAt(long seq) {
+            return taken.stream().filter(t -> t.events() <= seq).reduce((first, second) -> second)
+                    .orElseThrow(() -> new AssertionError("no snapshot at or before event " + seq));
+        }
+
+        /** The first snapshot taken after event {@code seq} and before event {@code beforeSeq}, if any. */
+        Optional<Taken> between(long seq, long beforeSeq) {
+            return taken.stream().filter(t -> t.events() >= seq && t.events() < beforeSeq).findFirst();
+        }
     }
 }

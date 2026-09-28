@@ -77,6 +77,9 @@ final class ConsoleReporter implements Consumer<ExecutionEvent> {
             case CHANGESET_APPLIED -> print("  ✎ " + task + e.message() + style.dim(" " + e.data().get("files")));
             case CHANGESET_ROLLED_BACK -> print(style.yellow("  ⟲ ") + task + e.message()
                     + (e.data().get("cause") == null ? "" : style.dim("  [" + e.data().get("cause") + "]")));
+            case CHANGESET_RECOVERED -> print(style.yellow("  ⟲ ") + task + e.message()
+                    + style.dim(Boolean.TRUE.equals(e.data().get("diskTouched")) ? "  [restored " + e.data().get("restored") + "]"
+                            : "  [already rolled back on disk]"));
             case HUMAN_INPUT_REQUESTED -> print(style.yellow("  ⏸ ") + task + "human checkpoint " + e.data().get("request") + " ["
                     + e.data().get("kind") + "]: " + e.message());
             case HUMAN_INPUT_CANCELLED -> print(style.dim("  ⊘ ") + task + "human checkpoint " + e.data().get("request")

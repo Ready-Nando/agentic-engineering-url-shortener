@@ -34,7 +34,7 @@ final class DesignHandler implements TaskHandler {
         RequirementSpec spec = context.read(ArtifactKeys.REQUIREMENT_SPEC, RequirementSpec.class);
         JsonNode impact = context.find(ArtifactKeys.IMPACT_ANALYSIS, JsonNode.class).orElse(null);
         DesignProposal design = reasoning.proposeDesign(new DesignRequest(context.task().id(), context.invocation(), spec,
-                impact, context.feedback()));
+                RequirementAnalysisHandler.clarificationAnswers(context), impact, context.feedback()));
         if (design.decisions().isEmpty()) {
             throw ReasoningException.invalid("design contains no decisions");
         }

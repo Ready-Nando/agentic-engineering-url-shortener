@@ -22,6 +22,8 @@ import tools.jackson.databind.JsonNode;
  */
 final class ReleaseAssessmentHandler implements TaskHandler {
 
+    private static final String MAIN_JAVA = "src/main/java/";
+
     @Override
     public TaskResult execute(TaskContext context) {
         List<Artifact> changes = context.readAll(ArtifactKeys.CHANGES_PREFIX);
@@ -57,12 +59,20 @@ final class ReleaseAssessmentHandler implements TaskHandler {
         item(items, "security-review-clean", "Aggregate security/compliance review has no open findings",
                 security.map(s -> s.path("status").asString().equals("CLEAN")).orElse(!changed),
                 security.map(s -> s.path("status").asString() + ", " + s.path("approvedFindings").size() + " approved findings").orElse("not reviewed"));
+        // Without a review, only the change sets themselves can show the API was left alone: the design's
+        // own change labels are claims, not evidence.
+        List<String> apiPaths = changes.stream().flatMap(c -> paths(c).stream()).filter(ReleaseAssessmentHandler::isApiRelevant)
+                .distinct().sorted().toList();
         item(items, "api-compatible-and-documented", "No breaking change to the documented API; new operations implemented and documented",
-                api.map(a -> a.path("status").asString().equals("COMPATIBLE")).orElse(!hasApiChanges(contract)),
-                api.map(a -> a.path("status").asString() + ", added " + a.path("addedOperations")).orElse("not reviewed"));
+                api.map(a -> a.path("status").asString().equals("COMPATIBLE")).orElse(apiPaths.isEmpty()),
+                api.map(a -> a.path("status").asString() + ", added " + a.path("addedOperations"))
+                        .orElse(apiPaths.isEmpty() ? "not reviewed; no API-relevant file changed" : "not reviewed, but changed " + apiPaths));
         boolean docsTouched = changes.stream().anyMatch(c -> touches(c, "docs/") || touches(c, WorkspaceFacts.OPENAPI) || touches(c, "README.md"));
+        // Labels may only add to what the review measured: added operations need documentation whatever they say.
+        boolean docsRequired = hasApiChanges(contract) || api.map(a -> !a.path("addedOperations").isEmpty()).orElse(false);
         item(items, "documentation-updated", "Documentation updated for externally visible changes",
-                !hasApiChanges(contract) || docsTouched, docsTouched ? "documentation changed" : "no documentation change");
+                !docsRequired || docsTouched, docsTouched ? "documentation changed"
+                        : docsRequired ? "API changed but no documentation change" : "no documentation change");
 
         boolean ready = items.stream().allMatch(i -> Boolean.TRUE.equals(i.get("passed")));
         Map<String, Object> content = new LinkedHashMap<>();
@@ -123,5 +133,27 @@ final class ReleaseAssessmentHandler implements TaskHandler {
             }
         }
         return false;
+    }
+
+    private static List<String> paths(Artifact changeSet) {
+        List<String> paths = new ArrayList<>();
+        changeSet.content().path("files").forEach(file -> paths.add(file.path("path").asString()));
+        return paths;
+    }
+
+    /**
+     * Files that can change the HTTP API: main sources in an {@code api} or {@code web} package (at any depth),
+     * any {@code *Controller.java}, and the OpenAPI document.
+     */
+    private static boolean isApiRelevant(String path) {
+        if (path.equals(WorkspaceFacts.OPENAPI) || path.endsWith("Controller.java")) {
+            return true;
+        }
+        if (!path.startsWith(MAIN_JAVA)) {
+            return false;
+        }
+        List<String> directories = List.of(path.substring(MAIN_JAVA.length()).split("/"));
+        directories = directories.subList(0, directories.size() - 1);
+        return directories.contains("api") || directories.contains("web");
     }
 }

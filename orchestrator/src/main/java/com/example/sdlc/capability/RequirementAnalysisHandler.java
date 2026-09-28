@@ -25,15 +25,23 @@ final class RequirementAnalysisHandler implements TaskHandler {
 
     @Override
     public TaskResult execute(TaskContext context) {
-        Map<String, String> answers = context.find(ArtifactKeys.CLARIFICATIONS, Clarifications.class)
-                .map(Clarifications::answers)
-                .orElse(Map.of());
-        RequirementSpec spec = reasoning.analyzeRequirement(new RequirementRequest(
-                context.task().id(), context.invocation(), context.requirement(), answers, context.feedback()));
+        RequirementSpec spec = reasoning.analyzeRequirement(new RequirementRequest(context.task().id(), context.invocation(),
+                context.requirement(), clarificationAnswers(context), context.feedback()));
         validate(spec);
         return TaskResult.of("normalised requirement: " + spec.acceptanceCriteria().size() + " acceptance criteria, "
                         + spec.assumptions().size() + " assumptions, " + spec.openQuestions().size() + " open questions",
                 ArtifactKeys.REQUIREMENT_SPEC, OutputArtifact.of("requirement-spec", spec));
+    }
+
+    /**
+     * The product owner's answers, if a clarification happened. Reading them through the context records the
+     * clarifications as an input, so lineage shows that the output was derived from human decisions. Shared by every
+     * handler that asks the reasoning component.
+     */
+    static Map<String, String> clarificationAnswers(TaskContext context) {
+        return context.find(ArtifactKeys.CLARIFICATIONS, Clarifications.class)
+                .map(Clarifications::answers)
+                .orElse(Map.of());
     }
 
     /** Structural contract; semantic quality (measurability, ambiguity) is judged by the requirement gate. */

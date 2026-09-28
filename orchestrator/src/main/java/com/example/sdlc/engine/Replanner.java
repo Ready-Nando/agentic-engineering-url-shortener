@@ -38,12 +38,18 @@ final class Replanner {
     private final Workspace workspace;
     private final EventLog log;
     private final Predicate<String> changesWorkspace;
+    private final Runnable checkpoint;
 
-    Replanner(WorkflowRun run, Workspace workspace, EventLog log, Predicate<String> changesWorkspace) {
+    /**
+     * @param checkpoint persists the run; called once an invalidation that rolled back change sets is complete, so
+     *                   a restart never resumes from a snapshot that still lists them as applied
+     */
+    Replanner(WorkflowRun run, Workspace workspace, EventLog log, Predicate<String> changesWorkspace, Runnable checkpoint) {
         this.run = run;
         this.workspace = workspace;
         this.log = log;
         this.changesWorkspace = changesWorkspace;
+        this.checkpoint = checkpoint;
     }
 
     /** Why change sets are rolled back; recorded on every rollback event so metrics can tell them apart. */
@@ -72,6 +78,12 @@ final class Replanner {
      */
     Set<String> invalidate(Collection<String> roots, String reason, Feedback rootFeedback, boolean newGenerationForRoots,
                            Set<String> exclude, String cause) {
+        return invalidate(roots, reason, rootFeedback, newGenerationForRoots, exclude, cause, true);
+    }
+
+    /** @param checkpoint false while a larger transition (a plan adoption) is still in progress; its caller persists */
+    private Set<String> invalidate(Collection<String> roots, String reason, Feedback rootFeedback, boolean newGenerationForRoots,
+                                   Set<String> exclude, String cause, boolean checkpoint) {
         Set<String> affected = new LinkedHashSet<>();
         Set<String> hard = new LinkedHashSet<>();
         Deque<String> queue = new ArrayDeque<>(roots);
@@ -87,7 +99,7 @@ final class Replanner {
             }
         }
 
-        rollBack(hard, reason, cause);
+        boolean rolledBack = rollBack(hard, reason, cause);
         for (String taskId : hard) {
             for (Artifact output : run.artifacts().producedBy(taskId)) {
                 run.artifacts().retract(output.key(), reason);
@@ -102,6 +114,9 @@ final class Replanner {
             boolean root = roots.contains(taskId);
             reset(run.task(taskId), root ? newGenerationForRoots : true, root ? rootFeedback : null,
                     root ? reason : "consumed output of invalidated work (" + reason + ")");
+        }
+        if (rolledBack && checkpoint) {
+            this.checkpoint.run();
         }
         return affected;
     }
@@ -128,21 +143,24 @@ final class Replanner {
                 removed.add(spec.id());
             }
         }
+        // Removed and changed tasks are invalidated before the new plan is adopted: whether a task's work is in the
+        // workspace follows from the capability it ran with, so a task id reused for a pure capability must still
+        // have its applied change set rolled back. The caller checkpoints once the whole adoption is done.
         if (!removed.isEmpty()) {
-            invalidate(removed, "removed by plan v" + next.version(), null, true, Set.of(), CAUSE_INVALIDATION);
-            for (String taskId : removed) {
-                TaskState state = run.task(taskId);
-                state.status(TaskStatus.CANCELLED);
-                state.detail("removed by plan v" + next.version());
-                log.append(EventType.TASK_CANCELLED, taskId, null, "removed by plan v" + next.version());
-            }
+            invalidate(removed, "removed by plan v" + next.version(), null, true, Set.of(), CAUSE_INVALIDATION, false);
+        }
+        if (!changed.isEmpty()) {
+            invalidate(changed, "task definition changed in plan v" + next.version(), null, true, Set.of(), CAUSE_INVALIDATION, false);
+        }
+        for (String taskId : removed) {
+            TaskState state = run.task(taskId);
+            state.status(TaskStatus.CANCELLED);
+            state.detail("removed by plan v" + next.version());
+            log.append(EventType.TASK_CANCELLED, taskId, null, "removed by plan v" + next.version());
         }
         run.adoptPlan(next);
         for (String taskId : added) {
             run.task(taskId).status(TaskStatus.PENDING);
-        }
-        if (!changed.isEmpty()) {
-            invalidate(changed, "task definition changed in plan v" + next.version(), null, true, Set.of(), CAUSE_INVALIDATION);
         }
         log.append(EventType.PLAN_REVISED, null, null,
                 "plan v" + next.version() + ": +" + added.size() + " added, " + changed.size() + " changed, "
@@ -178,7 +196,7 @@ final class Replanner {
                 "generation", state.generation(), "newGeneration", newGeneration);
     }
 
-    private void rollBack(Set<String> taskIds, String reason, String cause) {
+    private boolean rollBack(Set<String> taskIds, String reason, String cause) {
         List<AppliedChangeSet> toRollBack = run.appliedChanges().stream()
                 .filter(applied -> taskIds.contains(applied.taskId()))
                 .toList()
@@ -192,6 +210,7 @@ final class Replanner {
                     "rolled back " + applied.id() + " (" + applied.files().size() + " files): " + reason,
                     "changeSet", applied.id(), "files", applied.paths(), "cause", cause, "workspaceHash", workspace.contentHash());
         }
+        return !toRollBack.isEmpty();
     }
 
     private boolean hasAppliedChanges(String taskId) {

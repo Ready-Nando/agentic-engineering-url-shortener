@@ -1,0 +1,13 @@
+# A second supported answer to the same clarification: one configured lifetime for every link, applied
+# retroactively, with expired links answering 404:
+#   ./sdlc resume <run-id> --answers scenarios/ambiguous/answers-global-ttl.yaml
+# These option answers select the recordings in recordings/variants/global-ttl/ (see its variant.yaml).
+reviewer: product-owner
+answers:
+  Q-1: global-ttl
+  Q-2: "404"
+  A-1: confirm
+  AC-3: >-
+    Only following the link changes: once a link is older than the configured lifetime, GET /{code}
+    answers 404 exactly like an unknown code and records no click. GET /api/v1/links/{code} and the
+    link's statistics stay available.

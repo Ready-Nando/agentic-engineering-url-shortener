@@ -1,0 +1,42 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+response:
+  summary: "Tests covering AC-1..AC-5 and updates of the tests that construct ShortenerProperties"
+  rationale: "The lifetime is verified end to end through the HTTP API with the fixed test clock (tests move a link's stored created_at into the past instead of waiting, and insert rows directly to stand for links that existed before the change), with unit tests for the binding and validation of the setting, the exact expiry boundary and the metric outcome. Impact analysis listed LinkServiceTest and TargetUrlValidatorTest as affected: they construct ShortenerProperties, whose constructor gained the lifetime, so they are updated rather than left to fail to compile."
+  declaredRisk: LOW
+  changes:
+    - op: CREATE
+      path: src/test/java/com/example/shortener/config/ShortenerPropertiesTest.java
+      contentFile: files/ShortenerPropertiesTest.java
+    - op: CREATE
+      path: src/test/java/com/example/shortener/link/LinkExpiryTest.java
+      contentFile: files/LinkExpiryTest.java
+    - op: CREATE
+      path: src/test/java/com/example/shortener/link/api/LinkLifetimeIntegrationTest.java
+      contentFile: files/LinkLifetimeIntegrationTest.java
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkServiceTest.java
+      find: |2
+        import java.time.Clock;
+      replace: |2
+        import java.time.Clock;
+        import java.time.Duration;
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkServiceTest.java
+      find: |2-
+        URI.create("https://sho.rt"), 7, 5, new ShortenerProperties.Stats(7, 90)
+      replace: |2-
+        URI.create("https://sho.rt"), 7, 5, new ShortenerProperties.Stats(7, 90), Duration.ofDays(365)
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/TargetUrlValidatorTest.java
+      find: |2
+        import java.net.URI;
+      replace: |2
+        import java.net.URI;
+        import java.time.Duration;
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/TargetUrlValidatorTest.java
+      find: |2-
+        URI.create("https://sho.rt"), 7, 5, new ShortenerProperties.Stats(7, 90)
+      replace: |2-
+        URI.create("https://sho.rt"), 7, 5, new ShortenerProperties.Stats(7, 90), Duration.ofDays(365)

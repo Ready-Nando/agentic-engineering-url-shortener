@@ -34,7 +34,7 @@ final class PlanningHandler implements TaskHandler {
         RequirementSpec spec = context.read(ArtifactKeys.REQUIREMENT_SPEC, RequirementSpec.class);
         JsonNode impact = context.find(ArtifactKeys.IMPACT_ANALYSIS, JsonNode.class).orElse(null);
         PlanProposal proposal = reasoning.proposePlan(new PlanRequest(context.task().id(), context.invocation(), spec,
-                impact, plannableCapabilities, context.feedback()));
+                RequirementAnalysisHandler.clarificationAnswers(context), impact, plannableCapabilities, context.feedback()));
         if (proposal.tasks().isEmpty()) {
             throw ReasoningException.invalid("plan proposal contains no tasks");
         }

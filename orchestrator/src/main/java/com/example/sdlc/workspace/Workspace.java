@@ -42,6 +42,12 @@ public final class Workspace {
     private static final Set<String> IGNORED_FILES = Set.of(".DS_Store");
     private static final String TEMP_PREFIX = ".tmp-";
 
+    /**
+     * Marks a last line that has no terminating newline. A line never contains '\n' otherwise, so the marked line
+     * differs from the same text with a newline, and adding or removing the final newline is a visible change.
+     */
+    private static final String NO_FINAL_NEWLINE = "\n";
+
     private final Path root;
     private final Path baseline;
 
@@ -172,19 +178,38 @@ public final class Workspace {
     }
 
     public AppliedChangeSet apply(String id, String taskId, int attempt, ChangeSet changeSet) {
+        Prepared prepared = prepare(id, taskId, attempt, changeSet);
+        write(prepared);
+        return prepared.applied();
+    }
+
+    /** A change set resolved for writing: its compensation record plus the content to write. */
+    public record Prepared(AppliedChangeSet applied, List<FileDelta> deltas) {
+    }
+
+    /**
+     * Resolves a change set and its compensation record without writing anything, so the record can be made
+     * durable before the first file changes (a crash while writing is then reconciled like an interrupted rollback).
+     */
+    public Prepared prepare(String id, String taskId, int attempt, ChangeSet changeSet) {
         List<FileDelta> deltas = preview(changeSet);
-        List<AppliedChangeSet.AppliedFile> applied = new ArrayList<>();
-        for (FileDelta delta : deltas) {
+        List<AppliedChangeSet.AppliedFile> files = deltas.stream()
+                .map(delta -> new AppliedChangeSet.AppliedFile(delta.path(), delta.op(), delta.before(),
+                        delta.after() == null ? null : Json.sha256(delta.after())))
+                .toList();
+        return new Prepared(new AppliedChangeSet(id, taskId, attempt, changeSet.summary(), files), deltas);
+    }
+
+    /** Writes a prepared change set in order; a failure leaves the files written so far at their post-image. */
+    public void write(Prepared prepared) {
+        for (FileDelta delta : prepared.deltas()) {
             Path file = resolve(root, delta.path());
             if (delta.after() == null) {
                 deleteFile(file);
             } else {
                 writeAtomically(file, delta.after());
             }
-            applied.add(new AppliedChangeSet.AppliedFile(delta.path(), delta.op(), delta.before(),
-                    delta.after() == null ? null : Json.sha256(delta.after())));
         }
-        return new AppliedChangeSet(id, taskId, attempt, changeSet.summary(), applied);
     }
 
     /**
@@ -210,6 +235,55 @@ public final class Workspace {
         }
     }
 
+    /** Where a file of an applied change set stands relative to that change set (see {@link #stateOf}). */
+    public enum FileState { POST_IMAGE, PRE_IMAGE, NEITHER }
+
+    /**
+     * Whether {@code file} still holds what its change set wrote, is back at its pre-image (absent for a created
+     * file), or holds something else. Used to reconcile the recorded change stack with the disk after a restart;
+     * a file that is both (an edit that wrote identical content) counts as still applied.
+     */
+    public FileState stateOf(AppliedChangeSet.AppliedFile file) {
+        Optional<String> current = read(file.path());
+        String currentHash = current.map(Json::sha256).orElse(null);
+        if (file.postHash() == null ? currentHash == null : file.postHash().equals(currentHash)) {
+            return FileState.POST_IMAGE;
+        }
+        return holdsPreImage(file) ? FileState.PRE_IMAGE : FileState.NEITHER;
+    }
+
+    /** Whether {@code file} holds its pre-image (is absent for a created file), whatever its post-image is. */
+    public boolean holdsPreImage(AppliedChangeSet.AppliedFile file) {
+        Optional<String> current = read(file.path());
+        return file.preImage() == null ? current.isEmpty() : current.map(file.preImage()::equals).orElse(false);
+    }
+
+    /**
+     * Completes an interrupted rollback: restores the files of {@code applied} that still hold their post-image
+     * and returns their paths. Refuses (without touching anything) unless every file is at its post- or
+     * pre-image, so a file changed by anyone else is never overwritten.
+     */
+    public List<String> completeRollback(AppliedChangeSet applied) {
+        List<AppliedChangeSet.AppliedFile> pending = new ArrayList<>();
+        for (AppliedChangeSet.AppliedFile file : applied.files()) {
+            switch (stateOf(file)) {
+                case POST_IMAGE -> pending.add(file);
+                case PRE_IMAGE -> { }
+                case NEITHER -> throw new WorkspaceException(WorkspaceException.Reason.INTEGRITY,
+                        "cannot complete the rollback of " + applied.id() + ": " + file.path() + " was modified after it was applied");
+            }
+        }
+        for (AppliedChangeSet.AppliedFile file : pending.reversed()) {
+            Path target = resolve(root, file.path());
+            if (file.preImage() == null) {
+                deleteFile(target);
+            } else {
+                writeAtomically(target, file.preImage());
+            }
+        }
+        return pending.stream().map(AppliedChangeSet.AppliedFile::path).toList();
+    }
+
     /** Hash over all tracked files (build output excluded); equal hashes mean identical source trees. */
     public String contentHash() {
         return treeHash(root);
@@ -232,24 +306,70 @@ public final class Workspace {
     public String unifiedDiff(String pathPrefix) {
         StringBuilder diff = new StringBuilder();
         for (String path : changedPaths()) {
-            List<String> before = readBaseline(path).map(Workspace::lines).orElse(List.of());
-            List<String> after = read(path).map(Workspace::lines).orElse(List.of());
-            String from = readBaseline(path).isPresent() ? "a/" + pathPrefix + path : "/dev/null";
-            String to = read(path).isPresent() ? "b/" + pathPrefix + path : "/dev/null";
-            diff.append("diff --git a/").append(pathPrefix).append(path).append(" b/").append(pathPrefix).append(path).append('\n');
-            if (readBaseline(path).isEmpty()) {
-                diff.append("new file mode 100644\n");
-            } else if (read(path).isEmpty()) {
-                diff.append("deleted file mode 100644\n");
-            }
-            List<String> unified = UnifiedDiffUtils.generateUnifiedDiff(from, to, before, DiffUtils.diff(before, after), 3);
-            unified.forEach(line -> diff.append(line).append('\n'));
+            appendFileDiff(diff, pathPrefix, path, readBaseline(path).orElse(null), read(path).orElse(null));
         }
         return diff.toString();
     }
 
+    /** Complete unified diff of previewed deltas (e.g. a change set shown for approval), in the same format. */
+    public static String unifiedDiff(List<FileDelta> deltas, String pathPrefix) {
+        StringBuilder diff = new StringBuilder();
+        deltas.forEach(delta -> appendFileDiff(diff, pathPrefix, delta.path(), delta.before(), delta.after()));
+        return diff.toString();
+    }
+
+    private static void appendFileDiff(StringBuilder diff, String pathPrefix, String path, String beforeContent, String afterContent) {
+        List<String> before = beforeContent == null ? List.of() : lines(beforeContent);
+        List<String> after = afterContent == null ? List.of() : lines(afterContent);
+        String from = beforeContent != null ? "a/" + pathPrefix + path : "/dev/null";
+        String to = afterContent != null ? "b/" + pathPrefix + path : "/dev/null";
+        diff.append("diff --git a/").append(pathPrefix).append(path).append(" b/").append(pathPrefix).append(path).append('\n');
+        if (beforeContent == null) {
+            diff.append("new file mode 100644\n");
+        } else if (afterContent == null) {
+            diff.append("deleted file mode 100644\n");
+        }
+        List<String> unified = UnifiedDiffUtils.generateUnifiedDiff(from, to, before, DiffUtils.diff(before, after), 3);
+        for (String line : unified) {
+            if (line.endsWith(NO_FINAL_NEWLINE)) {
+                diff.append(line, 0, line.length() - 1).append("\n\\ No newline at end of file\n");
+            } else {
+                diff.append(line).append('\n');
+            }
+        }
+    }
+
+    /** Removed and added lines of one delta (duplicates included), from the same line diff as its unified diff. */
+    public record LineChanges(List<String> removed, List<String> added) {
+    }
+
+    public static LineChanges lineChanges(FileDelta delta) {
+        List<String> removed = new ArrayList<>();
+        List<String> added = new ArrayList<>();
+        List<String> before = delta.before() == null ? List.of() : lines(delta.before());
+        List<String> after = delta.after() == null ? List.of() : lines(delta.after());
+        DiffUtils.diff(before, after).getDeltas().forEach(change -> {
+            change.getSource().getLines().forEach(line -> removed.add(readable(line)));
+            change.getTarget().getLines().forEach(line -> added.add(readable(line)));
+        });
+        return new LineChanges(removed, added);
+    }
+
+    private static String readable(String line) {
+        return line.endsWith(NO_FINAL_NEWLINE) ? line.substring(0, line.length() - 1) + " (no newline at end of file)" : line;
+    }
+
+    /**
+     * Lines split on '\n' only, so a '\r' stays part of its line and CRLF changes show in the diff (String.lines()
+     * would drop it along with whether the file ends in a newline).
+     */
     private static List<String> lines(String content) {
-        return content.lines().toList();
+        List<String> lines = new ArrayList<>(List.of(content.split("\n", -1)));
+        String last = lines.removeLast();
+        if (!last.isEmpty()) {
+            lines.add(last + NO_FINAL_NEWLINE);
+        }
+        return lines;
     }
 
     private String applyEdit(String path, String current, FileChange change) {

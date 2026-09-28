@@ -1,0 +1,8 @@
+# Recorded "where does this change start" for the global-lifetime direction. The blast radius is computed
+# deterministically from the real codebase; the tests that construct ShortenerProperties follow from it.
+response:
+  rationale: "The lifetime is a new setting in ShortenerProperties (bound from application.yml) and is enforced by LinkService when GET /{code} resolves a link. No table changes: expiry is derived from short_link.created_at, and the link and statistics APIs stay as they are."
+  seeds:
+    - ShortenerProperties
+    - LinkService
+    - "GET /{code}"

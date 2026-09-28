@@ -4,7 +4,8 @@ response:
     Revised after plan validation: the security review now also covers the documentation change.
     Capture-side and query-side changes both touch ClickEventRepository, so they run in sequence;
     documentation depends only on the design and proceeds in parallel with implementation. The build,
-    the security review and the API review are independent checks that run in parallel before sign-off.
+    the security review and the API review are independent checks that run in parallel before sign-off;
+    the build verifies every change, the OpenAPI document included, since the contract test reads it.
   tasks:
     - id: design
       title: Design visitor fingerprinting and the statistics extension
@@ -51,7 +52,7 @@ response:
       title: Run the full test suite against the changed workspace
       capability: verify-build
       dependsOn: [tests, docs]
-      verifies: [impl-capture, impl-stats, tests]
+      verifies: [impl-capture, impl-stats, docs, tests]
     - id: security
       title: Security and compliance review of the aggregate change
       capability: review-security

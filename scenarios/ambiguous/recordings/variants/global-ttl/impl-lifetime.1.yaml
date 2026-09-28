@@ -1,0 +1,87 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+response:
+  summary: "Configure one lifetime for every link and stop redirecting links older than it"
+  rationale: "D-1/D-4: ShortenerProperties binds shortener.link-lifetime (365 days by default, stated explicitly in application.yml) and refuses a lifetime of zero or less. D-2/D-3: LinkService.resolve compares created_at plus the lifetime with the injected clock before the disabled check, so every expired link, including links created before this change, answers link-not-found like an unknown code; the expired outcome is counted separately. LinkService already receives ShortenerProperties, so its constructor is unchanged."
+  declaredRisk: MEDIUM
+  changes:
+    - op: EDIT
+      path: src/main/java/com/example/shortener/config/ShortenerProperties.java
+      find: |2
+        import java.net.URI;
+      replace: |2
+        import java.net.URI;
+        import java.time.Duration;
+    - op: EDIT
+      path: src/main/java/com/example/shortener/config/ShortenerProperties.java
+      find: |2
+                @DefaultValue @Valid Stats stats) {
+
+            public ShortenerProperties {
+                if (baseUrl != null && baseUrl.getHost() == null) {
+                    throw new IllegalArgumentException("shortener.base-url must be an absolute URL with a host: " + baseUrl);
+                }
+            }
+      replace: |2
+                @DefaultValue @Valid Stats stats,
+                // Every link stops redirecting this long after its creation, links created before expiry existed included.
+                @DefaultValue("365d") @NotNull Duration linkLifetime) {
+
+            public ShortenerProperties {
+                if (baseUrl != null && baseUrl.getHost() == null) {
+                    throw new IllegalArgumentException("shortener.base-url must be an absolute URL with a host: " + baseUrl);
+                }
+                if (linkLifetime != null && (linkLifetime.isZero() || linkLifetime.isNegative())) {
+                    throw new IllegalArgumentException("shortener.link-lifetime must be positive: " + linkLifetime);
+                }
+            }
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkService.java
+      find: |2
+            private final Counter redirectsGone;
+      replace: |2
+            private final Counter redirectsGone;
+            private final Counter redirectsExpired;
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkService.java
+      find: |2
+                this.redirectsGone = meterRegistry.counter("shortener.redirects", "outcome", "gone");
+      replace: |2
+                this.redirectsGone = meterRegistry.counter("shortener.redirects", "outcome", "gone");
+                this.redirectsExpired = meterRegistry.counter("shortener.redirects", "outcome", "expired");
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkService.java
+      find: |2
+             * @throws LinkNotFoundException if no link has this code
+             * @throws LinkGoneException if the link exists but was disabled
+             */
+            public ShortLink resolve(String code) {
+                Optional<ShortLink> link = linkRepository.findByCode(code);
+                if (link.isEmpty()) {
+                    redirectsNotFound.increment();
+                    throw new LinkNotFoundException(code);
+                }
+      replace: |2
+             * @throws LinkNotFoundException if no link has this code, or if the link is older than the configured
+             *                               lifetime: an expired link answers exactly like an unknown code
+             * @throws LinkGoneException if the link exists, has not expired, but was disabled
+             */
+            public ShortLink resolve(String code) {
+                Optional<ShortLink> link = linkRepository.findByCode(code);
+                if (link.isEmpty()) {
+                    redirectsNotFound.increment();
+                    throw new LinkNotFoundException(code);
+                }
+                // Checked before disabling so that an expired link never reveals that its code once existed.
+                if (!clock.instant().isBefore(link.get().createdAt().plus(properties.linkLifetime()))) {
+                    redirectsExpired.increment();
+                    throw new LinkNotFoundException(code);
+                }
+    - op: EDIT
+      path: src/main/resources/application.yml
+      find: |2
+          max-code-generation-attempts: 5
+      replace: |2
+          max-code-generation-attempts: 5
+          # Every link stops redirecting this long after its creation, including links created before this setting existed.
+          link-lifetime: 365d

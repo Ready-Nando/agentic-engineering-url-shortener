@@ -23,7 +23,7 @@ public record Endpoint(String method, String path, String handlerType, String ha
      * {@code {name:regex}} reduced to {@code {name}}. The regex may itself contain braces, as in
      * {@code {code:[a-z]{4,32}}}, so variables are delimited by brace depth rather than by a regex.
      */
-    static String normalizePath(String raw) {
+    public static String normalizePath(String raw) {
         String text = raw.strip();
         StringBuilder out = new StringBuilder("/");
         int i = 0;

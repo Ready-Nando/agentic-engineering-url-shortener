@@ -1,0 +1,8 @@
+# Recordings for the product owner's alternative decision: one configured lifetime for every link (Q-1),
+# 404 for expired links (Q-2) and retroactive expiry of existing links (A-1 confirmed). The offline provider
+# serves requests whose clarification answers equal all of these from this directory only; the free-text
+# answer to AC-3 is not matched.
+when:
+  Q-1: global-ttl
+  Q-2: "404"
+  A-1: confirm

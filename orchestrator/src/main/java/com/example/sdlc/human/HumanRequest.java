@@ -25,7 +25,15 @@ public record HumanRequest(
         Instant requestedAt,
         Instant respondedAt) {
 
+    /** Key prefix of the engine artifact holding the complete diff a change approval was requested for. */
+    public static final String CHANGE_REVIEW_PREFIX = "change-review/";
+
     public enum Kind { CHANGE_APPROVAL, GATE_APPROVAL, CLARIFICATION }
+
+    /** Where the run store writes that diff, relative to the run directory. */
+    public static String approvalPatchPath(String requestId) {
+        return "approvals/" + requestId + ".patch";
+    }
 
     public enum Status { PENDING, ANSWERED, APPLIED, CANCELLED }
 

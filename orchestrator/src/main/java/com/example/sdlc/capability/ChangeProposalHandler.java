@@ -61,7 +61,8 @@ final class ChangeProposalHandler implements TaskHandler {
             });
         }
         ChangeProposal proposal = reasoning.proposeChanges(new ChangeRequest(context.task().id(), context.invocation(),
-                context.task().goal(), context.task().scope(), spec, design, files, context.feedback()));
+                context.task().goal(), context.task().scope(), spec, RequirementAnalysisHandler.clarificationAnswers(context),
+                design, files, context.feedback()));
         validate(proposal);
         // Files the proposal edits or deletes but that were not in the context window are read now, so they too get
         // an optimistic-concurrency base hash and a lineage edge to whichever change set last wrote them.

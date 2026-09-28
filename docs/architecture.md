@@ -99,11 +99,13 @@ what the planner cannot opt out of:
 - each change capability may only touch its own part of the workspace (`implement`: `src/main/`,
   `author-tests`: `src/test/`, `document`: `docs/`, `README.md`, the OpenAPI document) - a planner cannot give
   itself `**`;
-- every change is verified and security reviewed, and **every workspace-wide check** (verification, security
-  review, API review, release assessment) runs after *all* change tasks, so none of them can read a workspace
-  that another task is still changing;
-- verification lists the change tasks it may send back for rework; exactly one release assessment closes the
-  plan and depends on every task;
+- a plan that changes code must contain verification, a security review **and** an API compatibility review, and
+  **every workspace-wide check** (verification, security review, API review, release assessment) runs after
+  *all* change tasks, so none of them can read a workspace that another task is still changing;
+- every verification task lists **every** change task in `verifies` (it builds and tests the whole tree, so any
+  change - documentation included - can be the culprit it sends back for rework), and verification tasks never run
+  in parallel with one another (they share the build directory); exactly one release assessment closes the plan
+  and depends on every task;
 - change tasks always wait for the baseline; retry budgets are clamped (3); mandatory gates are attached and
   the only fallback a task can have is its capability's default.
 
@@ -201,6 +203,13 @@ Approvals are **bound to what was shown**:
 Approvals are published as `approval/<id>` artifacts produced by `human:<name>`, so later reviews and lineage
 queries can prove who allowed what.
 
+**What a reviewer sees.** A change-set checkpoint names the files, the policy findings and a bounded excerpt of
+the removed (`-`) and added (`+`) lines of the actual line diff. The complete previewed diff - byte-faithful,
+including line-ending and final-newline changes - is persisted before the reviewer is asked: as the
+engine artifact `change-review/<request-id>` (with the exact approval fingerprint) and as
+`runs/<id>/approvals/<request-id>.patch`, which the request details point to. If the proposal changes, the
+new checkpoint gets a new diff and a new fingerprint; the earlier approval never applies to it.
+
 ## Governance
 
 ### Change policy
@@ -217,17 +226,37 @@ a decision. The verdict is the most restrictive finding.
 | SEC-03 | Security | DENY | Build toolchain or CI configuration modified (`mvnw`, `.mvn/`, `.github/`) |
 | SEC-04 | Security | APPROVAL | Existing request-handling or validation code changed (`web/`, `api/`, controllers, validators, policies) |
 | SEC-05 | Security | APPROVAL | Process execution added to test code, which verification runs on the host |
+| SEC-06 | Security | APPROVAL | New request-handling code added (a new controller, or a new file in a `web/` or `api/` package) |
 | CMP-01 | Compliance | DENY | Schema stores raw personal data (IP address, e-mail, phone, user agent) |
 | CMP-02 | Compliance | DENY | Personal data written to application logs |
-| CC-01 | Change control | DENY | Already-applied migration modified or deleted |
-| CC-02 | Change control | APPROVAL | New (not yet applied) migration added or changed |
-| CC-03 | Change control | DENY | Destructive schema or data operation in a migration |
+| CC-01 | Change control | DENY | Already-applied migration or existing SQL resource modified or deleted |
+| CC-02 | Change control | APPROVAL | New (not yet applied) migration or SQL resource added or changed |
+| CC-03 | Change control | DENY | Destructive schema or data operation in a migration or SQL resource |
 | CC-04 | Change control | APPROVAL | Dependency / build descriptor change |
 | CC-05 | Change control | DENY | File outside the task's approved scope |
 | CC-06 | Change control | APPROVAL | Existing source changed that impact analysis did not anticipate |
 | CC-07 | Change control | APPROVAL | Large change (> 15 files or > 800 changed lines) |
 | CC-08 | Change control | APPROVAL | Existing test deleted or tests disabled |
+| CC-09 | Change control | APPROVAL | Spring application configuration changed (`application*.yml`, `.yaml`, `.properties`, `.xml`) |
+| CC-10 | Change control | DENY | Configuration that redirects schema management or loads other configuration, or cannot be parsed |
 | GOV-01 | Governance | ALLOW | Self-declared risk recorded, not trusted |
+
+Migration rules apply to every SQL file under `src/main/resources`, not only to `db/migration`, so moving a
+script elsewhere does not escape CC-01/02/03 or CMP-01 (SQL under `src/test` is treated as a test fixture). Spring
+configuration is a control plane: any change to an application config file needs approval (CC-09), and CC-10 is
+decided structurally - both versions are parsed (all YAML documents, `.properties`, XML properties), keys are
+normalised the way Spring's relaxed binding does, and changes under `spring.flyway.*`, `spring.sql.init.*`,
+`spring.config.import/location`, profile activation, JPA DDL generation, connection-init SQL or a JDBC URL whose
+`INIT=` script appears (also through `${...}` placeholders) are denied. The Java rules (SEC-02, SEC-05, CMP-02)
+also run on whitespace-collapsed added statements, so a line break cannot split a pattern. Known limits, all on the
+side of caution or documented: a comment or string that merely mentions a forbidden API is flagged too; YAML
+aliases in application configuration are refused rather than resolved; personal data stored in numeric columns
+(a phone number as `BIGINT`) is not recognised by CMP-01. Two CC-10 gaps get an approval request instead of a
+denial: an H2 `INIT` script passed as a pool or driver property rather than in the JDBC URL (for example
+`spring.datasource.hikari.data-source-properties.INIT`), and an `INIT=` script behind `${...}` placeholders that
+expand beyond the resolver's bounds (ten rounds of substitution, 100,000 characters). Neither is applied
+autonomously: both are application configuration changes, so CC-09 still requires human approval with the complete
+proposed diff (`approvals/<request-id>.patch`) available to the reviewer.
 
 The security review re-applies the policy to the **aggregate** diff and cross-checks that every
 approval-requiring finding is backed by a recorded approval for the task that introduced it. Findings that
@@ -252,13 +281,16 @@ are the second line of defence.
 | `criteria-traced` | exit, author-tests | Every acceptance criterion is referenced by a test |
 | `tests-pass` / `acceptance-coverage` | exit, verify-build | Real suite passed; every criterion referenced by a passing test class; otherwise a code defect with suspects |
 | `static-checks-pass` | exit, verify-static | Degraded fallback checks |
-| `security-clean` / `api-compatible` | exit, reviews | No open findings; no breaking change to the documented API; new operations implemented and documented |
+| `security-clean` / `api-compatible` | exit, reviews | No open findings; no breaking change to the documented API - compared recursively (nested properties, array items, `allOf`/`oneOf`/`anyOf`): removed operations, schemas or properties, changed property types, newly required request properties or parameters, removed or changed 2xx responses, documented handlers that disappeared; new operations implemented and documented |
 | `readiness-checklist` / `release-approval` | exit, release | Evidence-based checklist (below), then human sign-off |
 
 Release readiness is computed only from evidence: the baseline and the final verification were real builds that
 passed; the verified tree is exactly the tree being released; every baseline test class still passes and no
 tests were lost; every criterion is covered; security and API reviews are clean; documentation changed if the
 API did. A degraded (static) verification can therefore never be released, whatever a human would approve.
+API compatibility is judged only from the independent API review: without one, the item fails as soon as any
+change touched an API-relevant path (`api/` or `web/` packages, controllers, the OpenAPI document); the design's
+own "unchanged" labels are never accepted as evidence.
 
 ## Failure handling and recovery
 
@@ -279,9 +311,12 @@ API did. A degraded (static) verification can therefore never be released, whate
 - **Fallback.** `verify-build` falls back to `verify-static` (degraded, clearly marked); the baseline build falls
   back to a static baseline. Fallbacks keep the run informative but readiness refuses degraded evidence.
 - **Rework.** When verification finds a defect, the engine attributes it to the change set most likely
-  responsible (files named by compiler errors; symbols quoted in failure messages that a change set introduced;
-  types referenced by the failing test) and sends only those tasks back, with the failing test output as
-  feedback. Their change sets are rolled back first. Rework consumes the target's attempt budget.
+  responsible (files named by compiler errors; otherwise, for each failing test, a changed resource it loads by
+  name - such as the OpenAPI document read by a contract test - together with symbols quoted in its failure message
+  that a change set introduced, or else types it references) and sends only those tasks back, with the failing test
+  output as feedback. Their change sets are rolled back first. Rework consumes the target's attempt budget. If the
+  suspects lie outside the verifier's declared coverage, nothing is reworked: the verification fails with a
+  message naming them and the run stops safely.
 - **Rollback.** Every applied change set keeps the pre-image of each file and the hash of what was written, and is
   checkpointed before its exit gates run. Rollback refuses to proceed if a file no longer holds what was written,
   so it can never silently destroy other work; rollbacks run in reverse application order and every rollback
@@ -292,8 +327,16 @@ API did. A degraded (static) verification can therefore never be released, whate
   applied change set and verifies that the workspace hash equals the baseline hash. The run ends `HALTED` with
   verdict `NOT_READY`; if compensation is impossible the status says exactly which change sets need manual
   attention.
-- **Interrupted processes.** On resume, attempts orphaned by a crashed process are recovered: a change set they
-  applied but never committed is rolled back, the attempt does not count, and the task runs again.
+- **Interrupted processes.** Applying is write-ahead - the change set is recorded and saved before any file is
+  written - and the run is saved again after every rollback. A process can still stop between a disk change and
+  the next save, so on resume (and on `sdlc cancel`) the applied-change stack is first reconciled with the
+  workspace: the engine finds the smallest set of change sets whose rollback (newest first, a whole change set at a
+  time, at most one interrupted part-way - or a write that never completed) explains exactly what is on disk, drops
+  them without touching disk and only completes the one interrupted restore. A file that matches no image of any
+  change set touching it is never written and stops the run for manual attention. A task whose committed change
+  was dropped this way runs again. Each recovery is a `CHANGESET_RECOVERED` event, not a second rollback. Attempts
+  orphaned by the crash are then recovered: a change set they applied but never committed is rolled back, the
+  attempt does not count, and the task runs again.
 
 ## State, artifacts and lineage
 
@@ -327,7 +370,8 @@ from the graph:
 
 Tasks declare narrow inputs (for example `decision/D-2`), so a revised decision reaches only the work derived
 from it. A plan revision is diffed against the previous version: unchanged tasks are preserved, changed tasks
-are invalidated, removed tasks are compensated and cancelled, new tasks are added. Checkpoints of invalidated
+are invalidated (judged by their previous definition, so a task that keeps its id but no longer changes files
+still has its earlier change set rolled back), removed tasks are compensated and cancelled, new tasks are added. Checkpoints of invalidated
 work are withdrawn (and logged as such), and results of attempts that were running while their inputs changed
 are discarded when they arrive.
 
@@ -359,9 +403,13 @@ only report "unavailable" or "invalid output"), request an approval-free path, o
 
 The shipped provider is `RecordedReasoningProvider`: it replays recorded outputs from
 `scenarios/<id>/recordings/<task>.<invocation>.yaml`, where *invocation* is the task's execution count
-(persisted, so replay is stable across pause and resume). Recordings can declare the human answers they
-were made for, and may only include content files from their own `files/` directory; when there is no matching
-recording the provider fails with `REASONING_UNAVAILABLE` and the run stops safely instead of improvising. A
+(persisted, so replay is stable across pause and resume). Every reasoning request carries the human
+clarification answers, which are also recorded as an input of whatever it produces. Recordings can declare the
+answers they were made for (`expect.answers`, checked for every request kind), and a scenario can record
+alternative continuations keyed by answers: `recordings/variants/<name>/variant.yaml` lists the option answers
+(`when`) it was recorded for; if the answers match exactly one variant, only that directory is used. Recordings
+may only include content files from their own `files/` directory; when there is no matching recording the
+provider fails with `REASONING_UNAVAILABLE` and the run stops safely instead of improvising. A
 live model-backed provider would implement the same interface (prompting with the request and parsing a
 JSON-schema-constrained response); nothing else would change.
 

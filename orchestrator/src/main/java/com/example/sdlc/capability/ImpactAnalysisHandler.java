@@ -44,7 +44,7 @@ final class ImpactAnalysisHandler implements TaskHandler {
         JsonNode codebase = context.read(ArtifactKeys.CODEBASE_MODEL, JsonNode.class);
         CodebaseModel model = Json.convert(codebase.path("model"), CodebaseModel.class);
         ImpactSeeds seeds = reasoning.proposeImpactSeeds(new ImpactRequest(context.task().id(), context.invocation(), spec,
-                codebase.path("summary").asString(), context.feedback()));
+                RequirementAnalysisHandler.clarificationAnswers(context), codebase.path("summary").asString(), context.feedback()));
         ImpactAnalysis analysis = analyzer.analyze(model, seeds.seeds());
 
         TreeSet<String> anticipated = new TreeSet<>();

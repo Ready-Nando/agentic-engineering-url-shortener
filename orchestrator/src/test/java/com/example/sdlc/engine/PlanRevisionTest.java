@@ -65,7 +65,8 @@ class PlanRevisionTest {
                 planned("docs", "write", "describe A and B"),
                 plannedVerify("verify", List.of("implA", "implB"), "implA", "implB"),
                 planned("security", "secure", "", "implA", "implB"),
-                planned("release", "ship", "", "verify", "security", "docs"));
+                planned("api", "compat", "", "implA", "implB"),
+                planned("release", "ship", "", "verify", "security", "api", "docs"));
     }
 
     private static TaskResult secondPlan() {
@@ -75,10 +76,11 @@ class PlanRevisionTest {
                 planned("docs", "write", "describe A only", "notes"),
                 plannedVerify("verify", List.of("implA"), "implA"),
                 planned("security", "secure", "", "implA"),
-                planned("release", "ship", "", "verify", "security", "docs"));
+                planned("api", "compat", "", "implA"),
+                planned("release", "ship", "", "verify", "security", "api", "docs"));
     }
 
-    /** Governance-complete catalogue: change, verification, security review and a release with human sign-off. */
+    /** Governance-complete catalogue: change, verification, security and compatibility review, and a release with human sign-off. */
     private EngineHarness plannedHarness(TaskHandler planner) throws Exception {
         return new EngineHarness(tempDir)
                 .plannerCapability("plan", planner)
@@ -89,6 +91,8 @@ class PlanRevisionTest {
                         ctx -> output("verification", refs(ctx.readAll(ArtifactKeys.CHANGES_PREFIX))))
                 .roleCapability("secure", Capability.Role.SECURITY_REVIEW, List.of(),
                         ctx -> output("security", refs(ctx.readAll(ArtifactKeys.CHANGES_PREFIX))))
+                .roleCapability("compat", Capability.Role.COMPATIBILITY_REVIEW, List.of(),
+                        ctx -> output("compatibility", refs(ctx.readAll(ArtifactKeys.CHANGES_PREFIX))))
                 .roleCapability("ship", Capability.Role.RELEASE, List.of("signoff"), ctx -> output("release", refs(ctx.readAll(""))))
                 .gate("signoff", ctx -> GateResult.approval("ship " + ctx.task().id() + "?", List.of()));
     }
@@ -115,7 +119,7 @@ class PlanRevisionTest {
         assertThat(revisions.getLast().data())
                 .containsEntry("version", 3)
                 .containsEntry("added", List.of("notes"))
-                .containsEntry("changed", List.of("docs", "verify", "security"))
+                .containsEntry("changed", List.of("docs", "verify", "security", "api"))
                 .containsEntry("removed", List.of("implB"))
                 .containsEntry("preserved", List.of("planner", "implA", "release"));
 

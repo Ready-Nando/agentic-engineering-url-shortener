@@ -1,0 +1,59 @@
+# Recorded re-analysis after the product owner chose a configured lifetime for every link (Q-1: global-ttl),
+# 404 for expired links (Q-2) and confirmed that existing links expire too (A-1). The free-text answer to AC-3
+# is reflected in AC-2 and AC-3 below.
+expect:
+  answers:
+    Q-1: global-ttl
+    Q-2: "404"
+    A-1: confirm
+response:
+  title: Configured lifetime for every short link
+  changeType: ENHANCEMENT
+  summary: "Every link stops redirecting once it is older than one configured lifetime, shortener.link-lifetime (365 days by default; Q-1: global-ttl). This applies to the links that exist today as well, counted from their created_at (A-1 confirmed). Following an expired link answers 404 link-not-found exactly like a code that never existed and records no click (Q-2, AC-3); the link stays readable through the API and keeps its statistics. Clients see no API change: no request or response field is added."
+  acceptanceCriteria:
+    - id: AC-1
+      statement: "The lifetime of every link is the setting shortener.link-lifetime: 365 days in application.yml and by default; a lifetime of zero or less prevents the application from starting"
+      verification: "Binding tests of ShortenerProperties; integration test reading the configured value"
+    - id: AC-2
+      statement: "A link redirects with 302 until created_at plus the lifetime; from that instant on GET /{code} answers 404 with the link-not-found problem, exactly like an unknown code, and records no click"
+      verification: "API integration tests on both sides of the boundary with the fixed test clock; unit tests of the redirect outcome and its metric"
+    - id: AC-3
+      statement: "An expired link is still returned by GET /api/v1/links/{code}, and GET /api/v1/links/{code}/stats keeps reporting its clicks"
+      verification: API integration test on an expired link with a recorded click
+    - id: AC-4
+      statement: "Links created before this change expire by their stored created_at as well; no row is migrated or modified"
+      verification: "API integration test on rows inserted directly into short_link, one older and one younger than 365 days"
+    - id: AC-5
+      statement: "Link requests and responses are unchanged: no expiry field is accepted into or returned by the API"
+      verification: "API integration test of the link response; OpenApiContractTest keeps the documented fields exact"
+  constraints:
+    - "No schema change and no data migration: expiry is derived from the existing created_at"
+    - "No API change; openapi.yaml and the README only document the behaviour and the setting"
+    - "Errors are RFC 9457 problem documents, like every other error of the API"
+  assumptions:
+    - id: A-1
+      statement: "Links that already exist also expire, one lifetime after their created_at (confirmed by the product owner)"
+      impact: HIGH
+      confirmed: true
+    - id: A-2
+      statement: "Expiry is evaluated with the application clock (UTC) when a link is followed; no background job is needed"
+      impact: LOW
+      confirmed: false
+  outOfScope:
+    - "A per-link expiry or a per-link override of the lifetime (Q-1 answered global-ttl)"
+    - Deleting expired links or their click history
+    - Redirecting expired links to a notice page
+  openQuestions: []
+  risks:
+    - id: R-1
+      description: "Links that are already printed or shared and older than the lifetime stop working the moment this is deployed"
+      severity: HIGH
+      mitigation: "Announce the lifetime to link owners before the rollout; the lifetime is a setting, so it can be raised without a release"
+    - id: R-2
+      description: "Lowering shortener.link-lifetime later expires every link older than the new value at once"
+      severity: MEDIUM
+      mitigation: "Documented next to the setting; changes to application configuration need an approval"
+    - id: R-3
+      description: Clock drift between instances makes a link expire slightly early or late
+      severity: LOW
+      mitigation: "Instances run on synchronised UTC clocks; expiry is checked at redirect time"

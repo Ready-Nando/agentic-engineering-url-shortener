@@ -1,7 +1,6 @@
 package com.example.shortener.link.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.nullValue;
@@ -45,7 +44,7 @@ class LinkApiIntegrationTest extends AbstractIntegrationTest {
 
         String code = JsonPath.read(result.getResponse().getContentAsString(), "$.code");
         assertThat(result.getResponse().getHeader(HttpHeaders.LOCATION))
-                .isEqualTo("http://localhost/api/v1/links/" + code);
+                .isEqualTo("https://sho.rt/api/v1/links/" + code);
         assertThat((String) JsonPath.read(result.getResponse().getContentAsString(), "$.shortUrl"))
                 .isEqualTo("https://sho.rt/" + code);
     }
@@ -56,7 +55,7 @@ class LinkApiIntegrationTest extends AbstractIntegrationTest {
                 {"url": "https://example.org/launch", "alias": "launch-2026"}
                 """)
                 .andExpect(status().isCreated())
-                .andExpect(header().string(HttpHeaders.LOCATION, "http://localhost/api/v1/links/launch-2026"))
+                .andExpect(header().string(HttpHeaders.LOCATION, "https://sho.rt/api/v1/links/launch-2026"))
                 .andExpect(jsonPath("$.code").value("launch-2026"))
                 .andExpect(jsonPath("$.shortUrl").value("https://sho.rt/launch-2026"));
     }
@@ -159,7 +158,7 @@ class LinkApiIntegrationTest extends AbstractIntegrationTest {
         postLink(payload, "order-123")
                 .andExpect(status().isOk())
                 .andExpect(header().string("Idempotent-Replayed", "true"))
-                .andExpect(header().string(HttpHeaders.LOCATION, endsWith("/api/v1/links/" + code)))
+                .andExpect(header().string(HttpHeaders.LOCATION, "https://sho.rt/api/v1/links/" + code))
                 .andExpect(jsonPath("$.code").value(code));
 
         assertThat(first.getResponse().getHeader("Idempotent-Replayed")).isNull();

@@ -169,7 +169,9 @@ public final class EngineeringSummary {
         line("- **APIs:** " + join(analysis.path("endpoints"), e -> e.path("method").asString() + " " + e.path("path").asString()));
         line("- **Tables:** " + join(analysis.path("tables"), JsonNode::asString));
         line("- **Affected tests:** " + join(analysis.path("tests"), t -> simple(t.asString())));
-        line("- **Data flows:**");
+        // Said next to the flows because they read like call-level facts (see DataFlow), which they are not.
+        line("- **Data flows** (type-level over-approximations: they follow type references, not calls, so a flow may list "
+                + "READ and WRITE for a table that a reachable repository touches; a GET endpoint is not necessarily writing):");
         analysis.path("dataFlows").forEach(f -> line("  - " + f.path("entry").path("method").asString() + " " + f.path("entry").path("path").asString()
                 + " -> " + join(f.path("path"), p -> simple(p.asString())) + " -> `" + f.path("table").asString() + "` (" + f.path("access").asString() + ")"));
     }

@@ -79,7 +79,7 @@ final class RunExecution {
         this.workspace = workspace;
         this.log = log;
         this.checkpoint = checkpoint;
-        this.replanner = new Replanner(run, workspace, log, this::changesWorkspace);
+        this.replanner = new Replanner(run, workspace, log, this::changesWorkspace, () -> checkpoint.accept(run));
         this.pool = Executors.newFixedThreadPool(engine.settings.parallelism(), Thread.ofPlatform().name("worker-", 1).factory());
         this.completions = new ExecutorCompletionService<>(pool);
     }
@@ -93,6 +93,7 @@ final class RunExecution {
                 "workspaceHash", workspace.contentHash());
         try {
             guarded(() -> {
+                reconcileAppliedChanges();
                 recoverOrphanedAttempts();
                 List<String> answered = run.humanRequests().stream()
                         .filter(r -> r.status() == HumanRequest.Status.ANSWERED)
@@ -116,6 +117,8 @@ final class RunExecution {
     RunStatus stop(String reason) {
         try {
             requestHalt(reason);
+            // The snapshot may predate a rollback that already happened; compensation must start from the real disk.
+            guarded(this::reconcileAppliedChanges);
             safeStop();
         } finally {
             pool.shutdownNow();
@@ -390,7 +393,7 @@ final class RunExecution {
                             "gate", gateName, "phase", "exit");
                     TaskState.ParkedAt at = verdict.humanNeed().kind() == HumanRequest.Kind.CLARIFICATION
                             ? TaskState.ParkedAt.CLARIFICATION : TaskState.ParkedAt.GATE;
-                    park(spec, state, at, result, i, gateName, verdict.humanNeed(), List.of(), null);
+                    park(run.nextId("hr"), spec, state, at, result, i, gateName, verdict.humanNeed(), List.of(), null);
                     return;
                 }
             }
@@ -536,27 +539,46 @@ final class RunExecution {
         }
         // An approval covers exactly the change and rules that were shown; anything else needs a new decision.
         if (verdict.decision() == PolicyDecision.REQUIRE_APPROVAL && !fingerprint.equals(approvedFingerprint)) {
+            String requestId = run.nextId("hr");
             List<String> details = new ArrayList<>();
             if (recheck) {
                 details.add("The proposal or its policy findings changed after the previous approval; a new decision is needed.");
             }
             deltas.forEach(d -> details.add(d.op() + " " + d.path()));
             details.addAll(verdict.describe());
+            details.add("Complete diff: " + HumanRequest.approvalPatchPath(requestId) + " in the run directory");
             details.addAll(excerpt(deltas));
-            park(spec, state, TaskState.ParkedAt.CHANGE_APPROVAL, result, 0, null,
+            // Published before park() checkpoints, so the evidence is durable before the reviewer is asked.
+            publishChangeReview(requestId, spec, state, fingerprint, deltas);
+            park(requestId, spec, state, TaskState.ParkedAt.CHANGE_APPROVAL, result, 0, null,
                     new GateResult.HumanNeed(HumanRequest.Kind.CHANGE_APPROVAL,
                             "Approve change set for " + spec.id() + ": " + result.changes().summary(), details, List.of()),
                     approvalRules, fingerprint);
             return Optional.empty();
         }
-        AppliedChangeSet applied;
+        Workspace.Prepared prepared;
         try {
-            applied = workspace.apply(run.nextId("cs"), spec.id(), state.attempt(), result.changes());
+            prepared = workspace.prepare(run.nextId("cs"), spec.id(), state.attempt(), result.changes());
         } catch (WorkspaceException e) {
             failAttempt(spec, state, result, WorkflowEngine.kindOf(e), e.getMessage(), List.of(), List.of());
             return Optional.empty();
         }
+        AppliedChangeSet applied = prepared.applied();
+        // Write-ahead: the compensation record is durable before the first file changes, so a crash while writing
+        // is reconciled on restart like an interrupted rollback instead of leaving unrecorded changes behind.
         run.pushApplied(applied);
+        checkpoint.accept(run);
+        try {
+            workspace.write(prepared);
+        } catch (RuntimeException e) {
+            // Undoes only what was written; if even that fails, the error stops the run with the record still stacked.
+            workspace.completeRollback(applied);
+            run.removeApplied(applied.id());
+            checkpoint.accept(run);
+            failAttempt(spec, state, result, WorkflowEngine.classify(e), "change set could not be written: "
+                    + WorkflowEngine.describe(e), List.of(), List.of());
+            return Optional.empty();
+        }
         log.append(EventType.CHANGESET_APPLIED, spec.id(), state.attempt(),
                 "applied " + applied.id() + ": " + applied.files().size() + " file(s)",
                 "changeSet", applied.id(), "files", applied.paths(), "workspaceHash", workspace.contentHash());
@@ -573,7 +595,26 @@ final class RunExecution {
         return Json.sha256(text.toString());
     }
 
-    /** The added lines a reviewer must see to make an informed decision (bounded). */
+    /**
+     * Evidence for a change approval: the complete diff of exactly the deltas behind {@code fingerprint}, kept as an
+     * engine artifact (and written next to the run by the run store) so the decision can be audited later.
+     */
+    private void publishChangeReview(String requestId, TaskSpec spec, TaskState state, String fingerprint, List<FileDelta> deltas) {
+        Map<String, Object> content = new LinkedHashMap<>();
+        content.put("requestId", requestId);
+        content.put("taskId", spec.id());
+        content.put("generation", state.generation());
+        content.put("attempt", state.attempt());
+        content.put("fingerprint", fingerprint);
+        content.put("files", deltas.stream().map(d -> Map.of("op", d.op().name(), "path", d.path())).toList());
+        content.put("diff", Workspace.unifiedDiff(deltas, run.setting("patchPrefix", "")));
+        ArtifactStore.Publication publication = run.artifacts().publish(HumanRequest.CHANGE_REVIEW_PREFIX + requestId,
+                "change-diff", Json.tree(content), "engine", 0, List.of(), engine.clock.instant());
+        log.append(EventType.ARTIFACT_PUBLISHED, spec.id(), state.attempt(), "published " + publication.artifact().ref()
+                + " (diff shown for approval)", "artifact", publication.artifact().ref().toString(), "kind", "change-diff");
+    }
+
+    /** The removed and added lines a reviewer must see to make an informed decision (bounded). */
     private static List<String> excerpt(List<FileDelta> deltas) {
         List<String> lines = new ArrayList<>();
         for (FileDelta delta : deltas) {
@@ -581,19 +622,24 @@ final class RunExecution {
                 lines.add("... (excerpt truncated)");
                 break;
             }
-            if (delta.op() == FileChange.Op.DELETE) {
-                lines.add("--- " + delta.path() + ": file deleted");
-                continue;
-            }
-            Set<String> before = delta.before() == null ? Set.of() : new HashSet<>(delta.before().lines().toList());
-            List<String> added = delta.after().lines().filter(line -> !before.contains(line)).toList();
-            lines.add("--- " + delta.path() + " (" + added.size() + " added line(s))");
-            added.stream().limit(EXCERPT_LINES_PER_FILE).forEach(line -> lines.add("+ " + line));
-            if (added.size() > EXCERPT_LINES_PER_FILE) {
-                lines.add("+ ... " + (added.size() - EXCERPT_LINES_PER_FILE) + " more");
-            }
+            // The line diff behind the patch, not a set difference: removing one of two identical lines must show.
+            Workspace.LineChanges changes = Workspace.lineChanges(delta);
+            List<String> removed = changes.removed();
+            List<String> added = changes.added();
+            lines.add("--- " + delta.path() + (delta.op() == FileChange.Op.DELETE ? ": file deleted" : "")
+                    + " (" + removed.size() + " removed, " + added.size() + " added line(s))");
+            excerptOf(removed, "- ", lines);
+            excerptOf(added, "+ ", lines);
         }
         return lines;
+    }
+
+    private static void excerptOf(List<String> changed, String marker, List<String> lines) {
+        // A carriage return is shown, not sent to the reviewer's terminal (a CRLF-only change must stay visible).
+        changed.stream().limit(EXCERPT_LINES_PER_FILE).forEach(line -> lines.add(marker + line.replace("\r", "\\r")));
+        if (changed.size() > EXCERPT_LINES_PER_FILE) {
+            lines.add(marker + "... " + (changed.size() - EXCERPT_LINES_PER_FILE) + " more");
+        }
     }
 
     // ---------------------------------------------------------------- failures and recovery
@@ -608,6 +654,15 @@ final class RunExecution {
                 "kind", kind, "details", details, "stage", spec.stage());
 
         if (kind == FailureKind.CODE_DEFECT && !spec.verifies().isEmpty()) {
+            if (!suspects.isEmpty() && spec.verifies().stream().noneMatch(suspects::contains)) {
+                // Reworking the declared coverage would redo work the evidence does not implicate and leave the
+                // implicated work as it is; nothing this verifier may send back can fix it.
+                String outside = "defect suspected in " + suspects + ", outside the declared coverage " + spec.verifies();
+                log.append(EventType.REWORK_REQUESTED, spec.id(), state.attempt(), "cannot rework: " + outside,
+                        "targets", List.of(), "suspects", suspects, "verifies", spec.verifies(), "possible", false);
+                failTask(spec, state, kind, outside + ": " + message);
+                return;
+            }
             if (!rework(spec, state, message, details, suspects)) {
                 failTask(spec, state, kind, "rework budget exhausted: " + message);
             }
@@ -678,7 +733,11 @@ final class RunExecution {
         if (result == null || result.appliedChangeSetId() == null) {
             return;
         }
-        applied(result.appliedChangeSetId()).ifPresent(applied -> rollBack(applied, reason, CAUSE_ATTEMPT_REJECTED));
+        applied(result.appliedChangeSetId()).ifPresent(applied -> {
+            rollBack(applied, reason, CAUSE_ATTEMPT_REJECTED);
+            // A restart must not find the rolled-back change set on the stack (its rollback would then be refused).
+            checkpoint.accept(run);
+        });
     }
 
     private void rollBack(AppliedChangeSet applied, String reason, String cause) {
@@ -695,10 +754,12 @@ final class RunExecution {
      * reasoning replays the same response); the task then simply runs again.
      */
     private void recoverOrphanedAttempts() {
+        boolean recovered = false;
         for (TaskState state : run.activeTasks()) {
             if (state.status() != TaskStatus.RUNNING) {
                 continue;
             }
+            recovered = true;
             Optional<String> committed = run.artifacts().current(ArtifactKeys.changesOf(state.taskId()))
                     .map(changes -> changes.content().path("changeSet").asString());
             for (AppliedChangeSet applied : run.appliedChanges().reversed()) {
@@ -712,6 +773,168 @@ final class RunExecution {
             log.append(EventType.ATTEMPT_DISCARDED, state.taskId(), state.attempt() + 1,
                     "attempt orphaned by an interrupted process; will run again");
         }
+        if (recovered) {
+            checkpoint.accept(run);
+        }
+    }
+
+    /**
+     * A snapshot can list change sets whose rollback already happened: the process may have stopped between
+     * rollbacks and the next checkpoint (a plan adoption rolls back several batches under one checkpoint), or while
+     * writing a change set whose record was made durable first. Such a stack cannot be compensated (the strict
+     * rollback would refuse), so before anything else it is reconciled with the disk. Rollbacks happen newest
+     * first and a whole change set at a time, so a change set can only be rolled back once every later one sharing
+     * a file with it is; at most one change set - the one being rolled back or written at the stop - can be
+     * interrupted part-way. An explanation of the disk is therefore a set of rolled-back change sets, closed under
+     * "later change sets sharing a file", plus at most one interrupted member with no older member sharing its files:
+     * <ul>
+     *   <li>a file no rolled-back change set touches holds the post-image of the newest change set touching it;</li>
+     *   <li>any other file holds the pre-image of the oldest rolled-back change set touching it, or, when that is
+     *       the interrupted one, its post- or pre-image - the interrupted rollback (or write) is completed;</li>
+     *   <li>a file matching no image of any change set touching it (a hand edit) constrains nothing, but no change
+     *       set touching it is reconciled: it stays on the stack so the integrity gate or compensation fails closed.</li>
+     * </ul>
+     * Of the explanations, the one with the fewest rolled-back change sets wins (then one without an interrupted
+     * member, then the newest interrupted one): it keeps the most committed work and writes the least. Only files
+     * of the interrupted change set that hold its post-image are ever written. Owners are then brought in line: a
+     * RUNNING owner is recovered as an orphan, a parked owner's decision finds no applied change, and a SUCCEEDED
+     * owner whose committed change is gone is hard-invalidated.
+     */
+    private void reconcileAppliedChanges() {
+        List<AppliedChangeSet> stack = run.appliedChanges();
+        if (newestTouching(stack).values().stream().allMatch(file -> workspace.stateOf(file) == Workspace.FileState.POST_IMAGE)) {
+            return;
+        }
+        List<Map<String, Standing>> standing = stack.stream().map(applied -> {
+            Map<String, Standing> files = new HashMap<>();
+            applied.files().forEach(file -> files.put(file.path(),
+                    new Standing(workspace.stateOf(file) == Workspace.FileState.POST_IMAGE, workspace.holdsPreImage(file))));
+            return files;
+        }).toList();
+        Optional<Recovery> recovery = explanation(stack, standing, -1);
+        for (int interrupted = stack.size() - 1; interrupted >= 0; interrupted--) {
+            Optional<Recovery> candidate = explanation(stack, standing, interrupted);
+            if (candidate.isPresent() && (recovery.isEmpty() || candidate.get().rolledBack().size() < recovery.get().rolledBack().size())) {
+                recovery = candidate;
+            }
+        }
+        if (recovery.isEmpty() || recovery.get().rolledBack().isEmpty()) {
+            return;
+        }
+        List<AppliedChangeSet> rolledBack = recovery.get().rolledBack();
+        AppliedChangeSet interrupted = recovery.get().interrupted();
+        List<String> completed = interrupted == null ? List.of() : workspace.completeRollback(interrupted);
+        List<String> vanished = new ArrayList<>();
+        for (AppliedChangeSet applied : rolledBack.reversed()) {
+            List<String> restored = applied == interrupted ? completed : List.of();
+            run.removeApplied(applied.id());
+            TaskState owner = run.task(applied.taskId());
+            log.append(EventType.CHANGESET_RECOVERED, applied.taskId(), applied.attempt(), "recovered " + applied.id() + ": "
+                            + (restored.isEmpty() ? "it was already rolled back (or never written) before the restart"
+                            : "completed its interrupted rollback or write (restored " + restored.size() + " file(s))"),
+                    "changeSet", applied.id(), "files", applied.paths(), "diskTouched", !restored.isEmpty(),
+                    "restored", restored, "ownerStatus", owner.status(), "workspaceHash", workspace.contentHash());
+            boolean committed = run.artifacts().current(ArtifactKeys.changesOf(applied.taskId()))
+                    .map(changes -> changes.content().path("changeSet").asString().equals(applied.id()))
+                    .orElse(false);
+            if (owner.status() == TaskStatus.SUCCEEDED && committed && run.plan().contains(owner.taskId())) {
+                vanished.add(owner.taskId());
+            }
+        }
+        if (!vanished.isEmpty()) {
+            // After the stack is reconciled: invalidation may roll back change sets still on it.
+            replanner.invalidate(vanished, "committed change set no longer in the workspace after a restart", null, true,
+                    Set.of(), Replanner.CAUSE_INVALIDATION);
+        }
+        checkpoint.accept(run);
+    }
+
+    /** Whether a file of a stacked change set holds that change set's post-image and/or its pre-image. */
+    private record Standing(boolean post, boolean pre) {
+
+        boolean foreign() {
+            return !post && !pre;
+        }
+    }
+
+    /** Change sets found rolled back (stack order), and the one among them whose rollback or write was interrupted. */
+    private record Recovery(List<AppliedChangeSet> rolledBack, AppliedChangeSet interrupted) {
+    }
+
+    /**
+     * The smallest explanation of the disk (see reconciliation) in which {@code stack[interrupted]} is the
+     * interrupted change set ({@code -1}: none is), found by adding only what the disk forces: the newest change
+     * set touching a file not at its post-image, every later change set sharing a file with an added one, and the
+     * next older change set touching a file not at the pre-image of the oldest added one touching it.
+     */
+    private static Optional<Recovery> explanation(List<AppliedChangeSet> stack, List<Map<String, Standing>> standing, int interrupted) {
+        Map<String, List<Integer>> touching = new LinkedHashMap<>();
+        for (int i = 0; i < stack.size(); i++) {
+            for (String path : stack.get(i).paths()) {
+                touching.computeIfAbsent(path, p -> new ArrayList<>()).add(i);
+            }
+        }
+        Set<Integer> rolledBack = new HashSet<>();
+        boolean grew = true;
+        while (grew) {
+            grew = false;
+            for (Map.Entry<String, List<Integer>> entry : touching.entrySet()) {
+                String path = entry.getKey();
+                List<Integer> touchers = entry.getValue();
+                boolean foreign = touchers.stream().allMatch(i -> standing.get(i).get(path).foreign());
+                int oldest = 0;
+                while (oldest < touchers.size() && !rolledBack.contains(touchers.get(oldest))) {
+                    oldest++;
+                }
+                if (oldest == touchers.size()) {
+                    if (!foreign && !standing.get(touchers.getLast()).get(path).post()) {
+                        rollBackWithLaterSharers(stack, touching, touchers.getLast(), rolledBack);
+                        grew = true;
+                    }
+                    continue;
+                }
+                Standing file = standing.get(touchers.get(oldest)).get(path);
+                boolean isInterrupted = touchers.get(oldest) == interrupted;
+                if (foreign || touchers.contains(interrupted) && touchers.indexOf(interrupted) > oldest) {
+                    return Optional.empty();
+                }
+                if (isInterrupted ? file.post() || file.pre() : file.pre()) {
+                    continue;
+                }
+                if (isInterrupted || oldest == 0) {
+                    return Optional.empty();
+                }
+                rollBackWithLaterSharers(stack, touching, touchers.get(oldest - 1), rolledBack);
+                grew = true;
+            }
+        }
+        if (interrupted >= 0 && !rolledBack.contains(interrupted)) {
+            return Optional.empty();
+        }
+        List<AppliedChangeSet> found = new ArrayList<>();
+        for (int i = 0; i < stack.size(); i++) {
+            if (rolledBack.contains(i)) {
+                found.add(stack.get(i));
+            }
+        }
+        return Optional.of(new Recovery(List.copyOf(found), interrupted >= 0 ? stack.get(interrupted) : null));
+    }
+
+    private static void rollBackWithLaterSharers(List<AppliedChangeSet> stack, Map<String, List<Integer>> touching, int index,
+                                                 Set<Integer> rolledBack) {
+        if (!rolledBack.add(index)) {
+            return;
+        }
+        for (String path : stack.get(index).paths()) {
+            touching.get(path).stream().filter(i -> i > index)
+                    .forEach(later -> rollBackWithLaterSharers(stack, touching, later, rolledBack));
+        }
+    }
+
+    private static Map<String, AppliedChangeSet.AppliedFile> newestTouching(List<AppliedChangeSet> changeSets) {
+        Map<String, AppliedChangeSet.AppliedFile> files = new LinkedHashMap<>();
+        changeSets.forEach(applied -> applied.files().forEach(file -> files.put(file.path(), file)));
+        return files;
     }
 
     private void requestHalt(String reason) {
@@ -730,9 +953,9 @@ final class RunExecution {
 
     // ---------------------------------------------------------------- human checkpoints
 
-    private void park(TaskSpec spec, TaskState state, TaskState.ParkedAt at, AttemptResult result, int gateIndex,
+    private void park(String requestId, TaskSpec spec, TaskState state, TaskState.ParkedAt at, AttemptResult result, int gateIndex,
                       String gateName, GateResult.HumanNeed need, List<String> policyRules, String approvalFingerprint) {
-        HumanRequest request = new HumanRequest(run.nextId("hr"), need.kind(), spec.id(), state.generation(),
+        HumanRequest request = new HumanRequest(requestId, need.kind(), spec.id(), state.generation(),
                 state.attempt(), gateName, need.title(), need.details(), need.questions(), policyRules,
                 HumanRequest.Status.PENDING, null, engine.clock.instant(), null);
         run.addHumanRequest(request);
@@ -974,6 +1197,7 @@ final class RunExecution {
                 state.status(TaskStatus.ROLLED_BACK);
             }
             run.artifacts().retract(ArtifactKeys.changesOf(changeSet.taskId()), "compensated during safe stop");
+            checkpoint.accept(run);
         }
         boolean restored = workspace.contentHash().equals(workspace.baselineHash());
         log.append(EventType.WORKSPACE_RESTORED, null, null,

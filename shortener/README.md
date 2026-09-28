@@ -15,7 +15,7 @@ scratch.
 
 | Property                                  | Default                 | Meaning                                              |
 |-------------------------------------------|-------------------------|------------------------------------------------------|
-| `shortener.base-url`                      | `http://localhost:8080` | Public origin used to build `shortUrl`               |
+| `shortener.base-url`                      | `http://localhost:8080` | Public base URL, including any path prefix (such as a proxy prefix or the servlet context path), used to build `shortUrl` and the `Location` of created links |
 | `shortener.code-length`                   | `7`                     | Length of generated codes (4-32)                     |
 | `shortener.max-code-generation-attempts`  | `5`                     | Collision retries before answering 503               |
 | `shortener.stats.default-days`            | `7`                     | Statistics window when `days` is omitted             |
@@ -70,10 +70,10 @@ stable types under `https://example.com/problems/`:
 
 | Type                      | Status | When                                                           |
 |---------------------------|--------|----------------------------------------------------------------|
-| `validation-failed`       | 400    | Body fails bean validation; includes `errors: [{field, message}]` |
+| `validation-failed`       | 400    | Body fails bean validation (such as a `url` longer than 2048 characters); includes `errors: [{field, message}]` |
 | `malformed-request`       | 400    | Body missing or not JSON                                       |
 | `invalid-parameter`       | 400    | Query parameter of the wrong type                              |
-| `invalid-target-url`      | 400    | URL not absolute http(s), has user info, no host, too long, or points at the shortener |
+| `invalid-target-url`      | 400    | URL not a valid URI, not absolute http(s), has user info, no host, or points at the shortener |
 | `invalid-alias`           | 400    | Alias not `[A-Za-z0-9_-]{4,32}` or a reserved word             |
 | `invalid-idempotency-key` | 400    | Key not `[A-Za-z0-9_-]{1,64}`                                  |
 | `invalid-stats-window`    | 400    | `days` outside 1..`max-days`                                   |
@@ -152,4 +152,10 @@ queries.
 - Statistics are computed on read from raw click rows. That is fine at this scale, but high-traffic
   links would need pre-aggregated daily counts.
 - Target hosts must be ASCII (internationalized domain names need their punycode form).
+- Any absolute http(s) target is accepted, including private, loopback and link-local addresses. The
+  service only redirects and never fetches a target, so it offers no server-side request forgery
+  surface, but an anonymous shortener is an open redirector that can disguise phishing or malware
+  links. Only redirects to the shortener's own host are rejected. Authentication, rate limiting,
+  reputation or safe-browsing checks, allow and deny lists, and the abuse reporting a deployment adds
+  belong in front of or around the service.
 - Links do not expire, visitors are not de-duplicated, and there is no abuse reporting.

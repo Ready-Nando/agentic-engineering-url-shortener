@@ -3,6 +3,7 @@ package com.example.sdlc.engine;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -42,7 +43,8 @@ class PlanValidatorTest {
                 task("tests", "author-tests", List.of("impl"), List.of("src/test/**"), List.of(), 0),
                 task("verify", "verify-build", List.of("tests"), List.of(), List.of("impl", "tests"), 0),
                 task("security", "review-security", List.of("tests"), List.of(), List.of(), 0),
-                task("release", "assess-release", List.of("verify", "security"), List.of(), List.of(), 0));
+                task("api", "review-api", List.of("tests"), List.of(), List.of(), 0),
+                task("release", "assess-release", List.of("verify", "security", "api"), List.of(), List.of(), 0));
     }
 
     @Test
@@ -51,7 +53,7 @@ class PlanValidatorTest {
         WorkflowPlan plan = validated.plan();
 
         assertThat(plan.version()).isEqualTo(2);
-        assertThat(plan.tasks()).hasSize(bootstrap.tasks().size() + 6);
+        assertThat(plan.tasks()).hasSize(bootstrap.tasks().size() + 7);
         assertThat(plan.task("design").dependsOn()).containsExactly("planning");
         assertThat(plan.task("impl").dependsOn()).containsExactly("design", "baseline");
         assertThat(plan.task("impl").stage()).isEqualTo(Stage.IMPLEMENTATION);
@@ -95,6 +97,71 @@ class PlanValidatorTest {
                         .anyMatch(v -> v.contains("has no SECURITY_REVIEW task"))
                         .anyMatch(v -> v.contains("'verify' (VERIFICATION) must run after change task 'impl'"))
                         .anyMatch(v -> v.contains("must depend (transitively) on 'impl'")));
+    }
+
+    @Test
+    void everyVerificationTaskMustListEveryChangeTask() {
+        List<TaskSpec> plan = validPlan().stream()
+                .map(t -> t.id().equals("verify") ? task("verify", "verify-build", List.of("tests"), List.of(), List.of("impl"), 0) : t)
+                .toList();
+
+        assertThatThrownBy(() -> validator.validate(bootstrap, plan, "", "planning", null))
+                .isInstanceOfSatisfying(PlanRejectedException.class, e -> assertThat(e.violations())
+                        .containsExactly("'verify' must verify every change task; missing [tests]"));
+    }
+
+    @Test
+    void planThatChangesCodeMustBeCompatibilityReviewed() {
+        List<TaskSpec> plan = validPlan().stream()
+                .filter(t -> !t.id().equals("api"))
+                .map(t -> t.id().equals("release") ? t.withDependsOn(List.of("verify", "security")) : t)
+                .toList();
+
+        assertThatThrownBy(() -> validator.validate(bootstrap, plan, "", "planning", null))
+                .isInstanceOfSatisfying(PlanRejectedException.class, e -> assertThat(e.violations())
+                        .containsExactly("plan changes code but has no COMPATIBILITY_REVIEW task"));
+    }
+
+    /** A second verifier (e.g. one per partition), with the release waiting for both. */
+    private static List<TaskSpec> withSecondVerifier(List<String> firstVerifies, List<String> secondVerifies, List<String> secondDependsOn) {
+        List<TaskSpec> plan = new ArrayList<>(validPlan().stream()
+                .map(t -> t.id().equals("verify") ? task("verify", "verify-build", List.of("tests"), List.of(), firstVerifies, 0)
+                        : t.id().equals("release") ? t.withDependsOn(List.of("verify", "verify-again", "security", "api")) : t)
+                .toList());
+        plan.add(task("verify-again", "verify-build", secondDependsOn, List.of(), secondVerifies, 0));
+        return plan;
+    }
+
+    @Test
+    void verificationTasksMayNotPartitionTheChanges() {
+        // Each build runs the whole suite on the whole tree: 'verify' would meet a defect in 'tests' it may not send back.
+        List<TaskSpec> plan = withSecondVerifier(List.of("impl"), List.of("tests"), List.of("verify"));
+
+        assertThatThrownBy(() -> validator.validate(bootstrap, plan, "", "planning", null))
+                .isInstanceOfSatisfying(PlanRejectedException.class, e -> assertThat(e.violations()).containsExactly(
+                        "'verify' must verify every change task; missing [tests]",
+                        "'verify-again' must verify every change task; missing [impl]"));
+    }
+
+    @Test
+    void sequentialVerificationTasksThatEachVerifyEverythingAreAccepted() {
+        List<TaskSpec> plan = withSecondVerifier(List.of("impl", "tests"), List.of("impl", "tests"), List.of("verify"));
+
+        WorkflowPlan validated = validator.validate(bootstrap, plan, "", "planning", null).plan();
+
+        assertThat(validated.task("verify").verifies()).containsExactly("impl", "tests");
+        assertThat(validated.task("verify-again").verifies()).containsExactly("impl", "tests");
+        assertThat(validated.ancestors("verify-again")).contains("verify");
+        assertThat(validated.task("api").exitGates()).contains("api-compatible");
+    }
+
+    @Test
+    void verificationTasksMayNotRunInParallel() {
+        List<TaskSpec> plan = withSecondVerifier(List.of("impl", "tests"), List.of("impl", "tests"), List.of("tests"));
+
+        assertThatThrownBy(() -> validator.validate(bootstrap, plan, "", "planning", null))
+                .isInstanceOfSatisfying(PlanRejectedException.class, e -> assertThat(e.violations()).containsExactly(
+                        "verification tasks 'verify' and 'verify-again' could run in parallel; make one depend on the other"));
     }
 
     @Test
@@ -158,7 +225,7 @@ class PlanValidatorTest {
         List<TaskSpec> plan = validPlan().stream()
                 .map(t -> t.id().equals("verify")
                         ? new TaskSpec("verify", "verify", null, "verify-build", List.of("tests"), "", List.of(), List.of(),
-                        List.of("impl", "design"), List.of(), List.of(), 0, null)
+                        List.of("impl", "tests", "design"), List.of(), List.of(), 0, null)
                         : t)
                 .toList();
 
@@ -184,7 +251,7 @@ class PlanValidatorTest {
                 .map(t -> t.id().equals("verify") ? t.withDependsOn(List.of("impl")) : t).toList();
         List<TaskSpec> fixedVerifies = smaller.stream().map(t -> t.id().equals("verify")
                 ? new TaskSpec("verify", "verify", null, "verify-build", List.of("impl"), "", List.of(), List.of(), List.of("impl"), List.of(), List.of(), 0, null)
-                : t.id().equals("security") ? t.withDependsOn(List.of("impl")) : t).toList();
+                : t.id().equals("security") || t.id().equals("api") ? t.withDependsOn(List.of("impl")) : t).toList();
 
         WorkflowPlan v3 = validator.validate(v2, fixedVerifies, "", "planning", null).plan();
 

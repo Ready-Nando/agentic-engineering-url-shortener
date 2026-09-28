@@ -5,7 +5,7 @@ URL-shortening service.
 
 - [`shortener/`](shortener/README.md) – a production-style URL shortener: REST API, redirects, click
   analytics, idempotent creation, collision-safe code generation, RFC 9457 errors, Flyway-managed schema,
-  OpenAPI contract with drift test, 137 tests.
+  OpenAPI contract with drift test, 146 tests.
 - [`orchestrator/`](docs/architecture.md) – a deterministic orchestration engine that takes a requirement
   through requirements analysis, codebase impact analysis, planning, design, implementation, testing,
   documentation, validation and release readiness as an explicit **dependency graph with entry/exit gates**,
@@ -44,8 +44,9 @@ needed (the Maven Wrapper is included); the first build downloads dependencies.
 ./mvnw verify
 ```
 
-Builds both modules and runs the default test suites (shortener: 137 tests; orchestrator: 277 tests covering
-policy, workspace, codebase analysis, gates, engine semantics, CLI and a deterministic scenario run). The
+Builds both modules and runs the default test suites (shortener: 146 tests; orchestrator: 405 tests covering
+policy, workspace, codebase analysis, gates, engine semantics, crash recovery, CLI and deterministic scenario
+runs). The
 slower scenario tests that run the shortener's real test suite are opt-in:
 
 ```bash
@@ -91,6 +92,13 @@ command to continue, for example:
 
 ```bash
 ./sdlc resume <run-id> --answers scenarios/ambiguous/answers.yaml
+```
+
+A second recorded set of answers takes the same paused requirement in a different direction (a configured
+lifetime for every link instead of an optional per-link expiry), with a different specification, design and plan:
+
+```bash
+./sdlc resume <run-id> --answers scenarios/ambiguous/answers-global-ttl.yaml
 ```
 
 Each scenario takes roughly 10–20 seconds once Maven's cache is warm, most of it the shortener's own test suite
@@ -140,9 +148,11 @@ are cancelled, every applied change is compensated and the workspace is verified
 
 `./sdlc governance` prints the policy rules, gates and capability catalogue. Every run is stored under
 `runs/<run-id>/`: `run.json` (state), `events.jsonl` (audit log), `artifacts/` (every artifact version),
-`workspace/` and `baseline/`, and `outcome/` with `ENGINEERING_SUMMARY.md`, `changes.patch` (or
-`abandoned-changes.patch` after a safe stop) and `metrics.json`. A completed run's patch applies to this
-repository with `git apply runs/<run-id>/outcome/changes.patch`.
+`workspace/` and `baseline/`, `approvals/<request-id>.patch` (the complete diff each change approval was asked
+about), and `outcome/` with `ENGINEERING_SUMMARY.md`, `changes.patch` (or `abandoned-changes.patch` after a safe
+stop) and `metrics.json`. A completed run's patch applies to this repository with
+`git apply runs/<run-id>/outcome/changes.patch`. The [command reference](docs/scenarios.md#command-reference) lists
+every command, option and exit code.
 
 ## Repository layout
 

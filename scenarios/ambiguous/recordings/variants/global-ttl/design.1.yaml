@@ -1,0 +1,82 @@
+# Recorded design for the global-lifetime direction, replayed by the offline provider. There is no data model
+# change; the design-approval gate asks for sign-off because retroactive expiry (D-2) is a HIGH-impact decision.
+response:
+  summary: "One setting, shortener.link-lifetime (a Duration, 365 days by default), bounds the life of every link. LinkService compares created_at plus the lifetime with the service clock whenever a link is followed; an expired link answers 404 link-not-found like an unknown code and records no click. Existing links expire by their created_at, so nothing is migrated, and the API gains no field."
+  components:
+    - name: ShortenerProperties
+      responsibility: "Bind shortener.link-lifetime (default 365 days) and refuse a lifetime of zero or less at startup"
+      location: com.example.shortener.config
+      isNew: false
+    - name: LinkService
+      responsibility: "Treat a link older than the lifetime as not found when it is followed; count the expired outcome"
+      location: com.example.shortener.link
+      isNew: false
+    - name: application.yml
+      responsibility: "State the lifetime explicitly next to the other shortener settings"
+      location: src/main/resources
+      isNew: false
+  decisions:
+    - id: D-1
+      title: Expiry model
+      context: "The product owner chose one configured lifetime for every link (Q-1: global-ttl)."
+      alternatives:
+        - "Derive expiry from created_at and a Duration setting whenever a link is followed"
+        - "Store an expires_at per link, backfilled by a migration from created_at"
+        - Scheduled job that disables links once they are older than the lifetime
+      choice: "Derive expiry from created_at and a Duration setting whenever a link is followed"
+      rationale: "It needs no schema change and no job, takes effect exactly on time, and keeps one source of truth: changing the setting changes the lifetime of every link consistently. A stored expires_at would freeze the lifetime at write time and needs a schema migration and a backfill of every existing row for no benefit."
+      impact: MEDIUM
+    - id: D-2
+      title: Retroactive expiry of existing links
+      context: "A-1 was confirmed: links that exist today expire as well, counted from their created_at."
+      alternatives:
+        - "Existing links expire one lifetime after their created_at, like new links"
+        - "Existing links expire one lifetime after the deployment"
+        - Only links created after the deployment expire
+      choice: "Existing links expire one lifetime after their created_at, like new links"
+      rationale: "It is what the product owner confirmed, and it keeps a single rule for every row. Consequence: links older than 365 days stop redirecting as soon as this is deployed, which is why the rollout must be announced (R-1) and this decision needs sign-off."
+      impact: HIGH
+    - id: D-3
+      title: Response for an expired link
+      context: "Q-2 was answered with 404: an expired link should look as if it never existed."
+      alternatives:
+        - "404 with the existing link-not-found problem, identical to an unknown code"
+        - "410 with the link-gone problem, like a disabled link"
+        - "404 with a new link-expired problem type"
+      choice: "404 with the existing link-not-found problem, identical to an unknown code"
+      rationale: "A distinct type or detail would reveal that the code existed, which is what Q-2 rules out. Expiry is checked before disabling, so an expired link that was also disabled answers 404 as well. The metric gets its own outcome (shortener.redirects{outcome=expired}) so operators can still tell expiry from mistyped codes. Reading the link and its statistics through the API is unchanged (AC-3)."
+      impact: LOW
+    - id: D-4
+      title: Validating the lifetime
+      context: "A zero or negative Duration would expire every link at once."
+      alternatives:
+        - "Reject a lifetime of zero or less in the ShortenerProperties constructor, failing startup"
+        - "Clamp it to a minimum at runtime"
+      choice: "Reject a lifetime of zero or less in the ShortenerProperties constructor, failing startup"
+      rationale: "A misconfiguration should stop the deployment, not silently change behaviour; the constructor already validates base-url the same way."
+      impact: LOW
+  apiOperations:
+    - method: GET
+      path: /{code}
+      summary: "A link older than the configured lifetime answers 404 link-not-found and records no click"
+      responses:
+        - 302
+        - 404
+        - 410
+      change: MODIFIED
+    - method: GET
+      path: /api/v1/links/{code}
+      summary: "Unchanged; expired links remain readable"
+      responses:
+        - 200
+        - 404
+      change: UNCHANGED
+    - method: GET
+      path: /api/v1/links/{code}/stats
+      summary: "Unchanged; still available for expired links"
+      responses:
+        - 200
+        - 400
+        - 404
+      change: UNCHANGED
+  dataModel: []
