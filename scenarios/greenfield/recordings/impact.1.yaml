@@ -1,0 +1,11 @@
+# Recorded output of the "where does this change start" reasoning step. The blast radius is then
+# computed deterministically from the real codebase by the impact analyzer.
+response:
+  rationale: |2
+    The feature lives in a new package, so the change starts where it meets existing code: links are looked up and disabled through LinkService (which updates short_link through LinkRepository), the new abuse_report table references short_link, and unknown or disabled links are reported through the existing LinkNotFoundException and LinkGoneException mappings of ApiExceptionHandler.
+  seeds:
+    - LinkService
+    - LinkNotFoundException
+    - LinkGoneException
+    - ApiExceptionHandler
+    - short_link

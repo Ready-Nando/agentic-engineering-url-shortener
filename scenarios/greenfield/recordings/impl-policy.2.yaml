@@ -1,0 +1,11 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+# Re-run after the design revision invalidated the first version (it consumed decision D-2).
+response:
+  summary: "Configurable takedown rule (defaults: 3 distinct reporters within 24 hours)"
+  rationale: "Implements the revised decision D-2: threshold and window come from shortener.abuse.takedown.threshold and shortener.abuse.takedown.window with the previous values as defaults, are validated at startup (threshold at least 2, positive window) and logged. The public interface is unchanged, so AbuseReportService needs no change."
+  declaredRisk: MEDIUM
+  changes:
+    - op: CREATE
+      path: src/main/java/com/example/shortener/abuse/TakedownPolicy.java
+      contentFile: files/impl-policy.2/TakedownPolicy.java

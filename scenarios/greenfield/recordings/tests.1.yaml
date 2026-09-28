@@ -1,0 +1,31 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+# Impact analysis listed AbstractIntegrationTest as affected (it deletes from short_link); it is extended
+# so that reports do not block the cleanup of the links they reference.
+response:
+  summary: Tests for AC-1..AC-6 and cleanup of the new table between integration tests
+  rationale: "The takedown rule and the fingerprint are unit-tested; reporting, takedown, deduplication, the window boundary and privacy are verified end to end through the HTTP API with the fixed test clock, also behind a proxy with Spring's forwarded-header support, which reports IPv6 clients in brackets. AbstractIntegrationTest must empty abuse_report before short_link, which it references."
+  declaredRisk: LOW
+  changes:
+    - op: EDIT
+      path: src/test/java/com/example/shortener/AbstractIntegrationTest.java
+      find: |2
+                jdbc.sql("DELETE FROM click_event").update();
+      replace: |2
+                jdbc.sql("DELETE FROM abuse_report").update();
+                jdbc.sql("DELETE FROM click_event").update();
+    - op: CREATE
+      path: src/test/java/com/example/shortener/abuse/TakedownPolicyTest.java
+      contentFile: files/tests.1/TakedownPolicyTest.java
+    - op: CREATE
+      path: src/test/java/com/example/shortener/abuse/ReporterFingerprintTest.java
+      contentFile: files/tests.1/ReporterFingerprintTest.java
+    - op: CREATE
+      path: src/test/java/com/example/shortener/abuse/AbuseReportRepositoryIntegrationTest.java
+      contentFile: files/tests.1/AbuseReportRepositoryIntegrationTest.java
+    - op: CREATE
+      path: src/test/java/com/example/shortener/abuse/api/AbuseReportApiIntegrationTest.java
+      contentFile: files/tests.1/AbuseReportApiIntegrationTest.java
+    - op: CREATE
+      path: src/test/java/com/example/shortener/abuse/api/ForwardedClientAddressIntegrationTest.java
+      contentFile: files/tests.1/ForwardedClientAddressIntegrationTest.java

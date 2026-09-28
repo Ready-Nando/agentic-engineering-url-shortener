@@ -1,0 +1,35 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+response:
+  summary: "Persist abuse reports under a keyed, per-link reporter pseudonym"
+  rationale: "Implements the data model and decision D-1: a new migration (V1 stays untouched) creates abuse_report with one row per link and reporter; AbuseReportRepository inserts or refreshes that row and counts reporters since a point in time; ReporterFingerprint derives HMAC-SHA256(key, link id | client network) with the key from ABUSE_REPORTER_HASH_SECRET."
+  declaredRisk: MEDIUM
+  changes:
+    - op: CREATE
+      path: src/main/resources/db/migration/V2__create_abuse_report.sql
+      contentFile: files/impl-store.1/V2__create_abuse_report.sql
+    - op: CREATE
+      path: src/main/java/com/example/shortener/abuse/AbuseReason.java
+      contentFile: files/impl-store.1/AbuseReason.java
+    - op: CREATE
+      path: src/main/java/com/example/shortener/abuse/AbuseReport.java
+      contentFile: files/impl-store.1/AbuseReport.java
+    - op: CREATE
+      path: src/main/java/com/example/shortener/abuse/AbuseReportRepository.java
+      contentFile: files/impl-store.1/AbuseReportRepository.java
+    - op: CREATE
+      path: src/main/java/com/example/shortener/abuse/ReporterFingerprint.java
+      contentFile: files/impl-store.1/ReporterFingerprint.java
+    - op: EDIT
+      path: src/main/resources/application.yml
+      find: |2
+          stats:
+            default-days: 7
+            max-days: 90
+      replace: |2
+          stats:
+            default-days: 7
+            max-days: 90
+          abuse:
+            # HMAC key for reporter fingerprints. Supply it through the environment, with the same value on every instance.
+            reporter-hash-secret: ${ABUSE_REPORTER_HASH_SECRET:}

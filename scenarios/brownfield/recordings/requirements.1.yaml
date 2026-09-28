@@ -1,0 +1,55 @@
+# Recorded output of the requirement-analysis reasoning step.
+response:
+  title: Unique-visitor count in link statistics
+  changeType: ENHANCEMENT
+  summary: >
+    Extend the click analytics pipeline so each click carries a pseudonymous, day-scoped visitor
+    fingerprint (keyed hash of client address and user agent), and report the number of distinct
+    fingerprints in the statistics window. No raw personal data is stored and no cookies are used.
+  acceptanceCriteria:
+    - id: AC-1
+      statement: GET /api/v1/links/{code}/stats returns uniqueVisitors, the number of distinct visitor fingerprints within the requested window
+      verification: API integration test with clicks inside and outside the window
+    - id: AC-2
+      statement: Repeated clicks by the same client (same address and user agent) on the same UTC day count as one visitor; another day or user agent counts separately
+      verification: Unit test of the fingerprint plus API integration test through the redirect endpoint
+    - id: AC-3
+      statement: No raw IP address or user agent is persisted; only a 64-character keyed hash
+      verification: Integration test inspecting the stored click row; unit test of the fingerprint format
+    - id: AC-4
+      statement: Clicks recorded before the change (without fingerprint) still count in totalClicks and clicksInWindow but not in uniqueVisitors
+      verification: API integration test with legacy click rows
+    - id: AC-5
+      statement: Existing statistics fields keep their current values and meaning (additive API change)
+      verification: Existing statistics tests plus a regression test on the extended response
+  constraints:
+    - No cookies or client-side identifiers
+    - No raw personal data at rest (IP address, user agent)
+    - The hashing key must come from configuration or the environment, never from source code
+  assumptions:
+    - id: A-1
+      statement: The client address is the servlet remote address; behind a proxy, forwarded headers are resolved by the platform configuration
+      impact: MEDIUM
+      confirmed: false
+    - id: A-2
+      statement: '"Unique" is per UTC day, as the requirement states, so a multi-day window reports visitor-days'
+      impact: LOW
+      confirmed: false
+  outOfScope:
+    - Cross-device identity
+    - Bot filtering
+    - Backfilling fingerprints for historical clicks
+  openQuestions: []
+  risks:
+    - id: R-1
+      description: Leak of the hashing key would allow re-identification by brute-forcing the IPv4 space
+      severity: MEDIUM
+      mitigation: Key supplied through the environment; day-scoped input limits linkability
+    - id: R-2
+      description: Shared addresses (NAT, corporate proxies) undercount distinct people
+      severity: LOW
+      mitigation: Documented as an approximation; user agent is part of the fingerprint
+    - id: R-3
+      description: Extra hashing and column write on the redirect path
+      severity: LOW
+      mitigation: HMAC-SHA256 costs microseconds; analytics remain failure-isolated

@@ -1,0 +1,91 @@
+# Recorded plan proposal. The engine validates it, adds mandatory gates and prerequisite edges, and
+# only then turns it into the executable dependency graph.
+response:
+  rationale: "Storage first (migration, ShortLink, LinkRepository), then the creation and redirect rules and the API that build on it; both change ShortLink's callers, so they run in sequence. Documentation needs only the design and runs alongside implementation. The test task follows the lifecycle change and also updates the existing tests that construct ShortLink or CreateLinkCommand or call LinkRepository.insert. Build, security review and API review run in parallel before sign-off."
+  tasks:
+    - id: design
+      title: Design per-link expiry
+      capability: design
+      goal: "Decide storage, validation, redirect behaviour, API contract and schema change for per-link expiry"
+      maxAttempts: 2
+    - id: impl-storage
+      title: Store an optional expiry with each link
+      capability: implement
+      dependsOn:
+        - design
+      goal: "Add the expires_at column in a new migration, carry it in ShortLink and persist it in LinkRepository"
+      inputs:
+        - design/data-model
+        - decision/D-1
+        - decision/D-3
+      scope:
+        - "src/main/resources/db/migration/**"
+        - src/main/java/com/example/shortener/link/ShortLink.java
+        - src/main/java/com/example/shortener/link/LinkRepository.java
+      maxAttempts: 3
+    - id: impl-lifecycle
+      title: Accept expiresAt at creation and stop redirecting expired links
+      capability: implement
+      dependsOn:
+        - impl-storage
+      goal: "Validate expiresAt on creation, answer 410 for expired links, expose expiresAt in link responses"
+      inputs:
+        - design/api-contract
+        - decision/D-2
+        - decision/D-3
+        - decision/D-4
+      scope:
+        - "src/main/java/com/example/shortener/link/**"
+        - src/main/java/com/example/shortener/web/ApiExceptionHandler.java
+      maxAttempts: 3
+    - id: docs
+      title: Document expiresAt and the expired-link behaviour
+      capability: document
+      dependsOn:
+        - design
+      inputs:
+        - design/api-contract
+        - decision/D-2
+        - decision/D-4
+      scope:
+        - src/main/resources/static/openapi.yaml
+        - README.md
+    - id: tests
+      title: Tests for every acceptance criterion
+      capability: author-tests
+      dependsOn:
+        - impl-lifecycle
+      inputs:
+        - design/api-contract
+        - design/data-model
+      scope:
+        - "src/test/java/**"
+    - id: verify
+      title: Run the full test suite against the changed workspace
+      capability: verify-build
+      dependsOn:
+        - tests
+        - docs
+      verifies:
+        - impl-storage
+        - impl-lifecycle
+        - tests
+    - id: security
+      title: Security and compliance review of the aggregate change
+      capability: review-security
+      dependsOn:
+        - tests
+        - docs
+    - id: api-review
+      title: API compatibility and documentation review
+      capability: review-api
+      dependsOn:
+        - tests
+        - docs
+    - id: release
+      title: Release readiness and sign-off
+      capability: assess-release
+      dependsOn:
+        - verify
+        - security
+        - api-review

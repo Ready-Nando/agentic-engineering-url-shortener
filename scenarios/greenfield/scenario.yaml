@@ -1,0 +1,36 @@
+id: greenfield
+kind: GREENFIELD
+title: "Greenfield: abuse reporting and automatic takedown"
+description: |
+  Builds a new capability in its own package: public abuse reports with automatic takedown. Demonstrates a
+  plan with three parallel branches that join, a HIGH-impact design decision and a new table signed off by
+  a human, approval of the schema migration, and a release sign-off that sends the design back with a
+  change request. Only the work derived from the revised decision (the takedown rule, and the tests and
+  documentation describing it) is invalidated and redone; storage and API work are preserved.
+targetModule: shortener
+requirement: |
+  Trust & Safety needs a way for anyone to flag short links that are used for abuse. Add a public API to
+  report a link as SPAM, PHISHING, MALWARE or OTHER. When a link receives reports from at least 3 distinct
+  reporters within 24 hours, it must be disabled automatically, exactly as if its owner had disabled it, so
+  that its redirect answers 410 Gone. The same reporter reporting the same link repeatedly counts only once.
+  Reporter identity must never be stored raw: derive it from a keyed hash of the client address. Moderator
+  tooling (reviewing reports, reinstating links) is out of scope.
+reviewer:
+  name: scenario-reviewer
+  decisions:
+    - match: { kind: GATE_APPROVAL, task: design, generation: 1 }
+      decision: APPROVE
+      comment: "Takedown rule and pseudonymous reporter identity approved; new table approved in principle."
+    - match: { kind: GATE_APPROVAL, task: design, generation: 2 }
+      decision: APPROVE
+      comment: "Configurable rule approved: defaults unchanged, and the floor of 2 reporters keeps a single reporter powerless."
+    - match: { kind: CHANGE_APPROVAL, task: impl-store, rules: [CC-02] }
+      decision: APPROVE
+      comment: "New table only, no change to existing data; reporter_hash is pseudonymous."
+    - match: { kind: GATE_APPROVAL, task: release, generation: 1 }
+      decision: REQUEST_CHANGES
+      target: design
+      comment: "Trust & Safety must be able to tune the takedown threshold and window per environment without a code change (defaults 3 reporters / 24 h)."
+    - match: { kind: GATE_APPROVAL, task: release, generation: 2 }
+      decision: APPROVE
+      comment: "Configurable takedown rule verified; tests, coverage, security and API checks are green."

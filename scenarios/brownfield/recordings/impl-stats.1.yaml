@@ -1,0 +1,59 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+# First attempt: counts distinct visitors over the link's whole history instead of the window
+# (a genuine defect that the new AC-1 test catches when the real test suite runs).
+response:
+  summary: Expose uniqueVisitors in link statistics
+  rationale: Count distinct fingerprints per link and add the field to LinkStats and the API response.
+  declaredRisk: LOW
+  changes:
+    - op: EDIT
+      path: src/main/java/com/example/shortener/analytics/ClickEventRepository.java
+      find: |2
+            public Optional<Instant> lastClickAt(long linkId) {
+      replace: |2
+            /**
+             * Distinct visitor fingerprints of a link. Clicks without a fingerprint are not counted.
+             */
+            public long countDistinctVisitors(long linkId) {
+                return jdbc.sql("SELECT COUNT(DISTINCT visitor_hash) FROM click_event WHERE link_id = :linkId")
+                        .param("linkId", linkId)
+                        .query(Long.class)
+                        .single();
+            }
+
+            public Optional<Instant> lastClickAt(long linkId) {
+    - op: EDIT
+      path: src/main/java/com/example/shortener/analytics/LinkStats.java
+      find: |2
+                long clicksInWindow,
+                List<DailyClicks> daily,
+      replace: |2
+                long clicksInWindow,
+                long uniqueVisitors,
+                List<DailyClicks> daily,
+    - op: EDIT
+      path: src/main/java/com/example/shortener/analytics/AnalyticsService.java
+      find: |2
+                        clickEventRepository.countByLinkBetween(link.id(), windowStart, windowEnd),
+                        daily,
+      replace: |2
+                        clickEventRepository.countByLinkBetween(link.id(), windowStart, windowEnd),
+                        clickEventRepository.countDistinctVisitors(link.id()),
+                        daily,
+    - op: EDIT
+      path: src/main/java/com/example/shortener/analytics/api/LinkStatsResponse.java
+      find: |2
+                long clicksInWindow,
+                List<Day> daily,
+      replace: |2
+                long clicksInWindow,
+                long uniqueVisitors,
+                List<Day> daily,
+    - op: EDIT
+      path: src/main/java/com/example/shortener/analytics/api/LinkStatsResponse.java
+      find: |2
+                        stats.clicksInWindow(),
+      replace: |2
+                        stats.clicksInWindow(),
+                        stats.uniqueVisitors(),

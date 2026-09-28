@@ -1,0 +1,26 @@
+spring:
+  application:
+    name: url-shortener
+  datasource:
+    url: jdbc:h2:file:./data/shortener;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
+    username: sa
+    password: ""
+  flyway:
+    enabled: true
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+shortener:
+  base-url: http://localhost:8080
+  code-length: 7
+  max-code-generation-attempts: 5
+  stats:
+    default-days: 7
+    max-days: 90

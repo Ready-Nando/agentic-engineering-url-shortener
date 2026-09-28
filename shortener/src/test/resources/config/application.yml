@@ -1,0 +1,14 @@
+# Loaded on top of the main application.yml (config/ takes precedence), so tests run against the
+# real configuration except for the database: a private in-memory H2 per application context.
+spring:
+  datasource:
+    url: jdbc:h2:mem:shortener-${random.uuid};MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1
+  main:
+    banner-mode: off
+
+shortener:
+  base-url: https://sho.rt
+
+logging:
+  level:
+    root: WARN

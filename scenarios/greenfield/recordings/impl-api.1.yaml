@@ -1,0 +1,16 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+response:
+  summary: Report endpoint and automatic takedown flow
+  rationale: "Implements the API contract with decisions D-3 and D-4 against the interfaces in the design overview: AbuseReportController answers 202 without a body; AbuseReportService rejects unknown and disabled links through the existing problem mappings, stores the report and disables the link through LinkService.disable when TakedownPolicy requires it."
+  declaredRisk: MEDIUM
+  changes:
+    - op: CREATE
+      path: src/main/java/com/example/shortener/abuse/AbuseReportService.java
+      contentFile: files/impl-api.1/AbuseReportService.java
+    - op: CREATE
+      path: src/main/java/com/example/shortener/abuse/api/AbuseReportRequest.java
+      contentFile: files/impl-api.1/AbuseReportRequest.java
+    - op: CREATE
+      path: src/main/java/com/example/shortener/abuse/api/AbuseReportController.java
+      contentFile: files/impl-api.1/AbuseReportController.java

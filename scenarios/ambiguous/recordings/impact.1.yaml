@@ -1,0 +1,13 @@
+# Recorded output of the "where does this change start" reasoning step. The blast radius is then
+# computed deterministically from the real codebase by the impact analyzer.
+response:
+  rationale: "The expiry is a new attribute of ShortLink, stored by LinkRepository in short_link, accepted through CreateLinkRequest and CreateLinkCommand, validated and enforced by LinkService (which reuses LinkGoneException for the 410) and returned through LinkResponse."
+  seeds:
+    - ShortLink
+    - LinkRepository
+    - LinkService
+    - CreateLinkCommand
+    - CreateLinkRequest
+    - LinkResponse
+    - LinkGoneException
+    - short_link

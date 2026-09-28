@@ -1,0 +1,268 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+response:
+  summary: Tests covering AC-1..AC-5 and updates of the affected link tests
+  rationale: "Expiry is verified end to end through the HTTP API with the fixed test clock (a test moves a link's stored expiry into the past instead of waiting), with unit tests for the expiry boundary, the redirect outcomes, the request hash and the replay of an expired retry. Impact analysis listed LinkServiceTest and LinkRepositoryIntegrationTest as affected: they construct ShortLink and CreateLinkCommand and call LinkRepository.insert, whose signatures gained the expiry, so they are updated rather than left to fail. RedirectIntegrationTest, selected because it calls the redirect endpoint, pins the link-gone title that D-2 generalises to 'Link gone'."
+  declaredRisk: LOW
+  changes:
+    - op: CREATE
+      path: src/test/java/com/example/shortener/link/ShortLinkTest.java
+      contentFile: files/ShortLinkTest.java
+    - op: CREATE
+      path: src/test/java/com/example/shortener/link/api/LinkExpiryIntegrationTest.java
+      contentFile: files/LinkExpiryIntegrationTest.java
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkServiceTest.java
+      find: |2
+        import static org.mockito.ArgumentMatchers.eq;
+      replace: |2
+        import static org.mockito.ArgumentMatchers.eq;
+        import static org.mockito.ArgumentMatchers.isNull;
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkServiceTest.java
+      find: |2
+        import static org.mockito.Mockito.mock;
+      replace: |2
+        import static org.mockito.Mockito.mock;
+        import static org.mockito.Mockito.never;
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkServiceTest.java
+      find: |2
+        import java.util.Optional;
+        import java.util.SplittableRandom;
+        import org.junit.jupiter.api.Test;
+      replace: |2
+        import java.util.List;
+        import java.util.Optional;
+        import java.util.SplittableRandom;
+        import org.junit.jupiter.api.DisplayName;
+        import org.junit.jupiter.api.Test;
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkServiceTest.java
+      find: |2
+        /**
+         * Covers the idempotency insert race, which cannot be provoked deterministically through the API:
+         * a concurrent request with the same key commits between this request's lookup and its insert.
+         */
+      replace: |2
+        /**
+         * Covers the idempotency insert race, which cannot be provoked deterministically through the API:
+         * a concurrent request with the same key commits between this request's lookup and its insert. Also
+         * pins request hashing, the replay of a retry whose expiry has passed in the meantime, and the outcome
+         * counted for each kind of unusable redirect.
+         */
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkServiceTest.java
+      find: |2
+            private final LinkRepository repository = mock(LinkRepository.class);
+      replace: |2
+            private final LinkRepository repository = mock(LinkRepository.class);
+            private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkServiceTest.java
+      find: |2
+                    Clock.fixed(NOW, ZoneOffset.UTC),
+                    new SimpleMeterRegistry());
+      replace: |2
+                    Clock.fixed(NOW, ZoneOffset.UTC),
+                    meterRegistry);
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkServiceTest.java
+      find: |2
+                CreateLinkCommand command = new CreateLinkCommand("https://example.org/a", null, "order-42");
+                ShortLink winner = new ShortLink(7, "Wx12345", "https://example.org/a", LinkStatus.ACTIVE, NOW, null);
+      replace: |2
+                CreateLinkCommand command = new CreateLinkCommand("https://example.org/a", null, null, "order-42");
+                ShortLink winner = new ShortLink(7, "Wx12345", "https://example.org/a", LinkStatus.ACTIVE, NOW, null, null);
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkServiceTest.java
+      find: |2
+                when(repository.insert(anyString(), anyString(), any(), eq("order-42"), anyString()))
+      replace: |2
+                when(repository.insert(anyString(), anyString(), any(), isNull(), eq("order-42"), anyString()))
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkServiceTest.java
+      find: |2
+                verify(repository, times(1)).insert(anyString(), anyString(), any(), anyString(), anyString());
+      replace: |2
+                verify(repository, times(1)).insert(anyString(), anyString(), any(), isNull(), anyString(), anyString());
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkServiceTest.java
+      find: |2
+                CreateLinkCommand command = new CreateLinkCommand("https://example.org/a", "launch", "order-42");
+                CreateLinkCommand other = new CreateLinkCommand("https://example.org/b", "launch", "order-42");
+                ShortLink winner = new ShortLink(7, "launch", "https://example.org/b", LinkStatus.ACTIVE, NOW, null);
+      replace: |2
+                CreateLinkCommand command = new CreateLinkCommand("https://example.org/a", "launch", null, "order-42");
+                CreateLinkCommand other = new CreateLinkCommand("https://example.org/b", "launch", null, "order-42");
+                ShortLink winner = new ShortLink(7, "launch", "https://example.org/b", LinkStatus.ACTIVE, NOW, null, null);
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkServiceTest.java
+      find: |2
+                when(repository.insert(eq("launch"), anyString(), any(), eq("order-42"), anyString()))
+      replace: |2
+                when(repository.insert(eq("launch"), anyString(), any(), isNull(), eq("order-42"), anyString()))
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkServiceTest.java
+      find: |2
+                String withoutAlias = LinkService.requestHash(new CreateLinkCommand("https://example.org", null, "k"));
+                String withAlias = LinkService.requestHash(new CreateLinkCommand("https://example.org", "abcd", "k"));
+
+                assertThat(withoutAlias).hasSize(64).isNotEqualTo(withAlias);
+            }
+      replace: |2
+                String withoutAlias = LinkService.requestHash(new CreateLinkCommand("https://example.org", null, null, "k"));
+                String withAlias = LinkService.requestHash(new CreateLinkCommand("https://example.org", "abcd", null, "k"));
+
+                assertThat(withoutAlias).hasSize(64).isNotEqualTo(withAlias);
+            }
+
+            @Test
+            void requestHashDistinguishesExpiries() {
+                String never = LinkService.requestHash(new CreateLinkCommand("https://example.org", null, null, "k"));
+                String april = LinkService.requestHash(
+                        new CreateLinkCommand("https://example.org", null, Instant.parse("2026-04-01T00:00:00Z"), "k"));
+                String may = LinkService.requestHash(
+                        new CreateLinkCommand("https://example.org", null, Instant.parse("2026-05-01T00:00:00Z"), "k"));
+
+                assertThat(List.of(never, april, may)).doesNotHaveDuplicates();
+            }
+
+            @Test
+            void requestHashOfRequestsWithoutExpiryIsUnchanged() {
+                // Idempotency keys stored before expiry existed must keep matching retries of the same request.
+                assertThat(LinkService.requestHash(new CreateLinkCommand("https://example.org/checkout", null, null, "k")))
+                        .isEqualTo("e385789bbe7018ea23ea1b03a462d1a9ffb6477e8e5363a53a36058a96fc49a8");
+                assertThat(LinkService.requestHash(new CreateLinkCommand("https://example.org/checkout", "sale-2026", null, "k")))
+                        .isEqualTo("6b3c7a8bf177d485713a8424cb6728e32a1318ed0847e4f6836b1171faca4570");
+            }
+
+            @Test
+            void replaysARetryWhoseExpiryHasPassedSinceTheOriginalRequest() {
+                // The original request was accepted a minute ago; its retry arrives after the expiry it asked for.
+                CreateLinkCommand command = new CreateLinkCommand("https://example.org/a", null, NOW.minusSeconds(1), "order-43");
+                ShortLink original = new ShortLink(8, "Wx12346", "https://example.org/a", LinkStatus.ACTIVE,
+                        NOW.minusSeconds(60), NOW.minusSeconds(1), null);
+                when(repository.findByIdempotencyKey("order-43")).thenReturn(
+                        Optional.of(new IdempotentLink(original, LinkService.requestHash(command))));
+
+                CreateLinkResult result = service.create(command);
+
+                assertThat(result.replayed()).isTrue();
+                assertThat(result.link()).isEqualTo(original);
+            }
+
+            @Test
+            void rejectsANewRequestWhoseExpiryIsNotInTheFuture() {
+                CreateLinkCommand command = new CreateLinkCommand("https://example.org/a", null, NOW, "order-44");
+                when(repository.findByIdempotencyKey("order-44")).thenReturn(Optional.empty());
+
+                assertThatThrownBy(() -> service.create(command))
+                        .isInstanceOf(InvalidExpiryException.class)
+                        .hasMessage("expiresAt must be in the future");
+                verify(repository, never()).insert(anyString(), anyString(), any(), any(), any(), any());
+            }
+
+            @Test
+            @DisplayName("AC-3: a link resolves normally until its expiry")
+            void resolvesALinkBeforeItsExpiry() {
+                ShortLink link = new ShortLink(9, "offer01", "https://example.org/offer", LinkStatus.ACTIVE, NOW,
+                        NOW.plusSeconds(1), null);
+                when(repository.findByCode("offer01")).thenReturn(Optional.of(link));
+
+                assertThat(service.resolve("offer01")).isEqualTo(link);
+                assertThat(redirects("found")).isEqualTo(1);
+            }
+
+            @Test
+            @DisplayName("AC-3: resolving an expired link fails as gone and is counted as an expired redirect")
+            void resolvingAnExpiredLinkIsGoneAndCountedAsExpired() {
+                when(repository.findByCode("offer02")).thenReturn(Optional.of(new ShortLink(10, "offer02",
+                        "https://example.org/offer", LinkStatus.ACTIVE, NOW.minusSeconds(3600), NOW, null)));
+
+                assertThatThrownBy(() -> service.resolve("offer02"))
+                        .isInstanceOf(LinkGoneException.class)
+                        .hasMessage("Link 'offer02' expired at 2026-03-15T10:00:00Z");
+                assertThat(redirects("expired")).isEqualTo(1);
+                assertThat(redirects("gone")).isZero();
+            }
+
+            @Test
+            @DisplayName("AC-3: a disabled link is reported as disabled even when it has also expired")
+            void disablingTakesPrecedenceOverExpiry() {
+                when(repository.findByCode("offer03")).thenReturn(Optional.of(new ShortLink(11, "offer03",
+                        "https://example.org/offer", LinkStatus.DISABLED, NOW.minusSeconds(7200), NOW.minusSeconds(3600),
+                        NOW.minusSeconds(60))));
+
+                assertThatThrownBy(() -> service.resolve("offer03"))
+                        .isInstanceOf(LinkGoneException.class)
+                        .hasMessage("Link 'offer03' has been disabled");
+                assertThat(redirects("gone")).isEqualTo(1);
+                assertThat(redirects("expired")).isZero();
+            }
+
+            private double redirects(String outcome) {
+                return meterRegistry.counter("shortener.redirects", "outcome", outcome).count();
+            }
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/api/RedirectIntegrationTest.java
+      find: |2
+                        .andExpect(jsonPath("$.title").value("Link disabled"))
+      replace: |2
+                        .andExpect(jsonPath("$.title").value("Link gone"))
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkRepositoryIntegrationTest.java
+      find: |2
+        import java.time.Instant;
+        import org.junit.jupiter.api.Test;
+      replace: |2
+        import java.time.Instant;
+        import org.junit.jupiter.api.DisplayName;
+        import org.junit.jupiter.api.Test;
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkRepositoryIntegrationTest.java
+      find: |2
+                ShortLink inserted = repository.insert("nanos01", "https://example.org/", Instant.parse("2026-03-15T10:00:00.123456789Z"), null, null);
+
+                assertThat(repository.findByCode("nanos01")).contains(inserted);
+                assertThat(inserted.createdAt()).isEqualTo(Instant.parse("2026-03-15T10:00:00.123456Z"));
+            }
+      replace: |2
+                ShortLink inserted = repository.insert("nanos01", "https://example.org/", Instant.parse("2026-03-15T10:00:00.123456789Z"),
+                        null, null, null);
+
+                assertThat(repository.findByCode("nanos01")).contains(inserted);
+                assertThat(inserted.createdAt()).isEqualTo(Instant.parse("2026-03-15T10:00:00.123456Z"));
+            }
+
+            @Test
+            @DisplayName("AC-1: the expiry is stored with the link and read back exactly as insert returned it")
+            void storesTheExpiryWithTheLink() {
+                ShortLink inserted = repository.insert("expiry1", "https://example.org/", CREATED,
+                        Instant.parse("2026-04-01T00:00:00.123456789Z"), null, null);
+
+                assertThat(inserted.expiresAt()).isEqualTo(Instant.parse("2026-04-01T00:00:00.123456Z"));
+                assertThat(repository.findByCode("expiry1")).contains(inserted);
+            }
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkRepositoryIntegrationTest.java
+      find: |2
+                repository.insert("taken01", "https://example.org/a", CREATED, "key-1", "a".repeat(64));
+      replace: |2
+                repository.insert("taken01", "https://example.org/a", CREATED, null, "key-1", "a".repeat(64));
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkRepositoryIntegrationTest.java
+      find: "repository.insert(\"taken01\", \"https://example.org/b\", CREATED, null, null))"
+      replace: "repository.insert(\"taken01\", \"https://example.org/b\", CREATED, null, null, null))"
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkRepositoryIntegrationTest.java
+      find: "repository.insert(\"other01\", \"https://example.org/b\", CREATED, \"key-1\", \"b\".repeat(64)))"
+      replace: "repository.insert(\"other01\", \"https://example.org/b\", CREATED, null, \"key-1\", \"b\".repeat(64)))"
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkRepositoryIntegrationTest.java
+      find: "repository.insert(\"keyed01\", \"https://example.org/\", CREATED, \"key-2\", \"c\".repeat(64));"
+      replace: "repository.insert(\"keyed01\", \"https://example.org/\", CREATED, null, \"key-2\", \"c\".repeat(64));"
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/LinkRepositoryIntegrationTest.java
+      find: "repository.insert(\"active1\", \"https://example.org/\", CREATED, null, null);"
+      replace: "repository.insert(\"active1\", \"https://example.org/\", CREATED, null, null, null);"

@@ -1,0 +1,33 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+# Re-run after the design revision invalidated the first version (it consumed decision D-2).
+response:
+  summary: "Tests for AC-1..AC-6, including a configured takedown rule"
+  rationale: "Re-authored after decision D-2 changed: TakedownPolicyTest now constructs the policy with explicit values and covers the startup validation, and ConfiguredTakedownIntegrationTest proves that a configured threshold and window replace the defaults. The other tests are unchanged."
+  declaredRisk: LOW
+  changes:
+    - op: EDIT
+      path: src/test/java/com/example/shortener/AbstractIntegrationTest.java
+      find: |2
+                jdbc.sql("DELETE FROM click_event").update();
+      replace: |2
+                jdbc.sql("DELETE FROM abuse_report").update();
+                jdbc.sql("DELETE FROM click_event").update();
+    - op: CREATE
+      path: src/test/java/com/example/shortener/abuse/TakedownPolicyTest.java
+      contentFile: files/tests.2/TakedownPolicyTest.java
+    - op: CREATE
+      path: src/test/java/com/example/shortener/abuse/ReporterFingerprintTest.java
+      contentFile: files/tests.1/ReporterFingerprintTest.java
+    - op: CREATE
+      path: src/test/java/com/example/shortener/abuse/AbuseReportRepositoryIntegrationTest.java
+      contentFile: files/tests.1/AbuseReportRepositoryIntegrationTest.java
+    - op: CREATE
+      path: src/test/java/com/example/shortener/abuse/api/AbuseReportApiIntegrationTest.java
+      contentFile: files/tests.1/AbuseReportApiIntegrationTest.java
+    - op: CREATE
+      path: src/test/java/com/example/shortener/abuse/api/ForwardedClientAddressIntegrationTest.java
+      contentFile: files/tests.1/ForwardedClientAddressIntegrationTest.java
+    - op: CREATE
+      path: src/test/java/com/example/shortener/abuse/api/ConfiguredTakedownIntegrationTest.java
+      contentFile: files/tests.2/ConfiguredTakedownIntegrationTest.java

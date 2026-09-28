@@ -1,0 +1,74 @@
+# Recorded output of the requirement-analysis reasoning step, replayed by the offline provider: the first
+# analysis of the raw requirement. It asks about the expiry model (Q-1) and the response for expired links
+# (Q-2), but states a high-impact assumption (A-1) as settled instead of asking, and copies the requirement's
+# vague wording into AC-3. The requirement-quality gate, not this output, decides what blocks.
+response:
+  title: Expiring short links
+  changeType: ENHANCEMENT
+  summary: "Give short links a limited lifetime after which the redirect stops working. The request does not say how a link's lifetime is determined, what following an expired link should return, or what happens to the links that already exist."
+  acceptanceCriteria:
+    - id: AC-1
+      statement: A link redirects to its target with 302 until its expiry time
+      verification: API integration test with the fixed test clock
+    - id: AC-2
+      statement: "Once its expiry time has passed, GET /{code} no longer redirects to the target"
+      verification: API integration test that moves the expiry into the past
+    - id: AC-3
+      statement: Expired links are handled appropriately
+      verification: Integration tests of the expired-link behaviour
+    - id: AC-4
+      statement: Statistics of a link remain available after it has expired
+      verification: Statistics API integration test on an expired link
+  constraints:
+    - "API changes are additive; existing fields keep their meaning"
+    - "Errors are RFC 9457 problem documents, like every other error of the API"
+  assumptions:
+    - id: A-1
+      statement: "Links that already exist also receive the default expiry retroactively: they expire the default lifetime after their created_at"
+      impact: HIGH
+      confirmed: false
+    - id: A-2
+      statement: "Expiry is evaluated with the application clock (UTC) when a link is followed; no background job is needed"
+      impact: LOW
+      confirmed: false
+  outOfScope:
+    - Changing or removing an expiry after creation
+    - Deleting expired links or their click history
+  openQuestions:
+    - id: Q-1
+      question: "How does a link get its expiry?"
+      rationale: "The requirement only says that links should expire; the expiry model decides the API, the schema and which links are affected."
+      options:
+        - id: per-link
+          label: "Optional expiresAt per link, chosen when it is created (in the future, at most 365 days ahead); links without one never expire"
+          consequence: "additive API field and nullable column; clients opt in"
+        - id: global-ttl
+          label: Every link expires a configured time after its creation
+          consequence: "no API change, but every link gets a lifetime, including links already shared"
+        - id: both
+          label: A configured default lifetime that clients can override per link
+          consequence: "largest change: a new setting plus the per-link field"
+      blocking: true
+    - id: Q-2
+      question: "What should following an expired link return?"
+      rationale: "Browsers, crawlers and API clients treat these responses differently, and disabled links already answer 410 Gone."
+      options:
+        - id: "410"
+          label: "410 Gone with the link-gone problem, like a disabled link"
+          consequence: "consistent with disabling; reveals that the link existed"
+        - id: "404"
+          label: "404 Not Found, as if the code had never existed"
+          consequence: "hides that the link existed; indistinguishable from a mistyped code"
+        - id: notice-page
+          label: "302 to a configurable notice page"
+          consequence: "friendlier for people, but needs a new setting and a page to host"
+      blocking: true
+  risks:
+    - id: R-1
+      description: Links that are already printed or shared stop working once the default lifetime has passed
+      severity: HIGH
+      mitigation: Announce the default lifetime to link owners before the rollout
+    - id: R-2
+      description: Clock drift between instances makes a link expire slightly early or late
+      severity: LOW
+      mitigation: Instances run on synchronised UTC clocks

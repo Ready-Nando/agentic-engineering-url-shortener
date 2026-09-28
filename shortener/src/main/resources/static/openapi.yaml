@@ -1,0 +1,380 @@
+openapi: 3.0.3
+info:
+  title: URL Shortener API
+  version: 1.0.0
+  description: |
+    Creates short links, redirects visitors to their targets and reports click statistics.
+
+    All errors are RFC 9457 problem documents (`application/problem+json`). Application-specific
+    problems use a stable `type` URI under `https://example.com/problems/`; errors with no meaning
+    beyond their HTTP status (unknown route, unsupported method or media type) use `about:blank`.
+servers:
+  - url: http://localhost:8080
+tags:
+  - name: links
+    description: Manage short links
+  - name: redirect
+    description: Follow short links
+  - name: stats
+    description: Click statistics
+
+paths:
+  /api/v1/links:
+    post:
+      tags: [links]
+      operationId: createLink
+      summary: Create a short link
+      description: |
+        Creates a link with a generated base62 code, or with the given custom alias.
+
+        Send an `Idempotency-Key` to make retries safe: repeating the request with the same key and
+        the same payload returns the originally created link with status 200 and
+        `Idempotent-Replayed: true`. Reusing a key with a different payload is rejected with 422.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLinkRequest'
+            examples:
+              generated:
+                value:
+                  url: https://example.org/articles/2026/launch
+              alias:
+                value:
+                  url: https://example.org/articles/2026/launch
+                  alias: launch-2026
+      responses:
+        '201':
+          description: Link created
+          headers:
+            Location:
+              description: URL of the created link resource
+              schema:
+                type: string
+                format: uri
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Link'
+        '200':
+          description: Replay of an earlier request with the same Idempotency-Key and payload
+          headers:
+            Location:
+              description: URL of the link resource
+              schema:
+                type: string
+                format: uri
+            Idempotent-Replayed:
+              description: Always `true`; marks the response as a replay
+              schema:
+                type: string
+                enum: ['true']
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Link'
+        '400':
+          description: |
+            Invalid request. Problem types: `validation-failed` (with `errors`), `malformed-request`,
+            `invalid-target-url`, `invalid-alias`, `invalid-idempotency-key`.
+          content:
+            application/problem+json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/ValidationProblem'
+                  - $ref: '#/components/schemas/Problem'
+        '409':
+          $ref: '#/components/responses/AliasUnavailable'
+        '422':
+          $ref: '#/components/responses/IdempotencyKeyReuse'
+        '503':
+          $ref: '#/components/responses/CodeGenerationFailed'
+
+  /api/v1/links/{code}:
+    parameters:
+      - $ref: '#/components/parameters/Code'
+    get:
+      tags: [links]
+      operationId: getLink
+      summary: Get a link
+      description: Returns active and disabled links alike.
+      responses:
+        '200':
+          description: The link
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Link'
+        '404':
+          $ref: '#/components/responses/LinkNotFound'
+    delete:
+      tags: [links]
+      operationId: disableLink
+      summary: Disable a link
+      description: |
+        Soft-disables the link: redirects answer 410 Gone from then on, its statistics remain
+        available and its code is never reused. Disabling an already disabled link succeeds.
+      responses:
+        '204':
+          description: The link is disabled
+        '404':
+          $ref: '#/components/responses/LinkNotFound'
+
+  /api/v1/links/{code}/stats:
+    get:
+      tags: [stats]
+      operationId: getLinkStats
+      summary: Click statistics for a link
+      description: |
+        Totals over the link's lifetime plus a window of the last `days` UTC calendar days
+        (today included) with a zero-filled daily series and the top 5 referrer hosts.
+      parameters:
+        - $ref: '#/components/parameters/Code'
+        - name: days
+          in: query
+          required: false
+          description: Window length in days, between 1 and the configured maximum (90 by default)
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 90
+            default: 7
+      responses:
+        '200':
+          description: Statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LinkStats'
+        '400':
+          description: '`days` out of range (`invalid-stats-window`) or not a number (`invalid-parameter`)'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          $ref: '#/components/responses/LinkNotFound'
+
+  /{code}:
+    get:
+      tags: [redirect]
+      operationId: followLink
+      summary: Redirect to the link's target
+      description: |
+        Answers 302 Found with `Cache-Control: no-store` (not 301) so every click reaches the service
+        and disabled links stop working immediately. Each GET is recorded as a click with only the
+        referrer host; recording failures never fail the redirect. HEAD requests are not counted.
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Za-z0-9_-]{4,32}$'
+        - name: Referer
+          in: header
+          required: false
+          description: Only the host part is stored
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to the target URL
+          headers:
+            Location:
+              description: The target URL
+              schema:
+                type: string
+                format: uri
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+        '404':
+          $ref: '#/components/responses/LinkNotFound'
+        '410':
+          description: The link has been disabled (`link-gone`)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+components:
+  parameters:
+    Code:
+      name: code
+      in: path
+      required: true
+      description: Generated code or custom alias
+      schema:
+        type: string
+        maxLength: 32
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Client-chosen key that makes the request safe to retry
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9_-]{1,64}$'
+
+  responses:
+    LinkNotFound:
+      description: No link exists for the code (`link-not-found`)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    AliasUnavailable:
+      description: The alias is already in use, possibly by a disabled link (`alias-unavailable`)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    IdempotencyKeyReuse:
+      description: The Idempotency-Key was already used with a different payload (`idempotency-key-reuse`)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    CodeGenerationFailed:
+      description: No unique code could be generated; safe to retry (`code-generation-failed`)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+    CreateLinkRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: Absolute http(s) URL with a host, without user info, not pointing at the shortener itself
+        alias:
+          type: string
+          nullable: true
+          pattern: '^[A-Za-z0-9_-]{4,32}$'
+          description: Custom code; reserved words such as `api` or `admin` are rejected case-insensitively
+
+    Link:
+      type: object
+      required: [code, shortUrl, targetUrl, status, createdAt]
+      properties:
+        code:
+          type: string
+        shortUrl:
+          type: string
+          format: uri
+        targetUrl:
+          type: string
+          format: uri
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED]
+        createdAt:
+          type: string
+          format: date-time
+        disabledAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    LinkStats:
+      type: object
+      required: [code, totalClicks, window, clicksInWindow, daily, topReferrers]
+      properties:
+        code:
+          type: string
+        totalClicks:
+          type: integer
+          format: int64
+        lastClickAt:
+          type: string
+          format: date-time
+          nullable: true
+        window:
+          type: object
+          required: [from, to, days]
+          properties:
+            from:
+              type: string
+              format: date
+            to:
+              type: string
+              format: date
+            days:
+              type: integer
+              format: int32
+        clicksInWindow:
+          type: integer
+          format: int64
+        daily:
+          type: array
+          description: One entry per day of the window, oldest first
+          items:
+            type: object
+            required: [date, clicks]
+            properties:
+              date:
+                type: string
+                format: date
+              clicks:
+                type: integer
+                format: int64
+        topReferrers:
+          type: array
+          maxItems: 5
+          description: Most frequent referrer hosts in the window, most clicks first
+          items:
+            type: object
+            required: [host, clicks]
+            properties:
+              host:
+                type: string
+              clicks:
+                type: integer
+                format: int64
+
+    Problem:
+      type: object
+      description: RFC 9457 problem details
+      properties:
+        type:
+          type: string
+          format: uri
+          example: https://example.com/problems/link-not-found
+        title:
+          type: string
+        status:
+          type: integer
+          format: int32
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference
+
+    ValidationProblem:
+      allOf:
+        - $ref: '#/components/schemas/Problem'
+        - type: object
+          required: [errors]
+          properties:
+            errors:
+              type: array
+              items:
+                type: object
+                required: [field, message]
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string

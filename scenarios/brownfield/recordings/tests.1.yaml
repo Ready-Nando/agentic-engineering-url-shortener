@@ -1,0 +1,25 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+# Impact analysis listed RedirectIntegrationTest as affected: it asserts the exact set of stored click
+# columns, an invariant this change deliberately extends, so the test is updated rather than left to fail.
+response:
+  summary: Tests covering AC-1..AC-5 and an update of the affected redirect test
+  rationale: "Fingerprint properties are unit-tested; counting, privacy and compatibility are verified end to end through the HTTP API with the fixed test clock."
+  declaredRisk: LOW
+  changes:
+    - op: CREATE
+      path: src/test/java/com/example/shortener/analytics/VisitorFingerprintTest.java
+      contentFile: files/VisitorFingerprintTest.java
+    - op: CREATE
+      path: src/test/java/com/example/shortener/analytics/api/UniqueVisitorsIntegrationTest.java
+      contentFile: files/UniqueVisitorsIntegrationTest.java
+    - op: EDIT
+      path: src/test/java/com/example/shortener/link/api/RedirectIntegrationTest.java
+      find: |2
+                assertThat(row).containsOnlyKeys("id", "link_id", "occurred_at", "referrer_host");
+      replace: |2
+                // The row now also holds the keyed visitor fingerprint, but still no raw address or user agent.
+                assertThat(row).containsOnlyKeys("id", "link_id", "occurred_at", "referrer_host", "visitor_hash");
+                assertThat(row.get("visitor_hash").toString()).matches("[0-9a-f]{64}");
+                assertThat(row.values()).noneMatch(value -> value != null
+                        && (value.toString().contains("203.0.113.9") || value.toString().contains("Mozilla")));

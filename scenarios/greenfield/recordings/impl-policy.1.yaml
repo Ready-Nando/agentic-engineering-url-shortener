@@ -1,0 +1,10 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+response:
+  summary: "Takedown rule: 3 distinct reporters within 24 hours"
+  rationale: "Implements decision D-2 as a pure component behind the interface fixed in the design overview (windowStart, requiresTakedown), with the rule as constants."
+  declaredRisk: LOW
+  changes:
+    - op: CREATE
+      path: src/main/java/com/example/shortener/abuse/TakedownPolicy.java
+      contentFile: files/impl-policy.1/TakedownPolicy.java

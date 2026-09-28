@@ -1,0 +1,51 @@
+response:
+  summary: >
+    A new VisitorFingerprint component derives HMAC-SHA256(key, day | address | user agent). ClickRecorder
+    stores it in a new nullable click_event.visitor_hash column; AnalyticsService counts distinct
+    fingerprints in the window and the statistics response gains uniqueVisitors.
+  components:
+    - { name: VisitorFingerprint, responsibility: "Keyed, day-scoped pseudonymous visitor id", location: com.example.shortener.analytics, isNew: true }
+    - { name: ClickRecorder, responsibility: "Attach the fingerprint to each recorded click", location: com.example.shortener.analytics, isNew: false }
+    - { name: RedirectController, responsibility: "Pass client address and user agent to the recorder", location: com.example.shortener.link.api, isNew: false }
+    - { name: ClickEventRepository, responsibility: "Persist fingerprints; count distinct fingerprints per window", location: com.example.shortener.analytics, isNew: false }
+    - { name: AnalyticsService, responsibility: "Include uniqueVisitors in LinkStats", location: com.example.shortener.analytics, isNew: false }
+  decisions:
+    - id: D-1
+      title: Visitor identity without personal data
+      context: Distinct visitors need a stable identifier, but raw IPs and user agents are personal data and cookies are excluded.
+      alternatives:
+        - Store raw IP and user agent and count distinct values at query time
+        - First-party cookie with a random id
+        - Keyed daily HMAC of client address and user agent
+      choice: Keyed daily HMAC of client address and user agent
+      rationale: Nothing personal is stored; the key prevents brute-forcing the small IPv4 space; including the UTC day makes visitors unlinkable across days by construction.
+      impact: MEDIUM
+    - id: D-2
+      title: Hashing key management
+      context: The key must stay secret and out of source control.
+      alternatives:
+        - Hard-coded key
+        - Key from shortener.analytics.visitor-hash-secret (environment VISITOR_HASH_SECRET), random per-process key when unset
+      choice: Key from shortener.analytics.visitor-hash-secret (environment VISITOR_HASH_SECRET), random per-process key when unset
+      rationale: Keeps secrets in the environment; the random fallback keeps development friction-free at the cost of counts restarting with the process, which is logged.
+      impact: MEDIUM
+    - id: D-3
+      title: Counting semantics and backward compatibility
+      context: Fingerprints are day-scoped; historical clicks have none.
+      alternatives:
+        - Distinct fingerprints across the window
+        - Per-day distinct counts returned as a series only
+      choice: Distinct fingerprints across the window
+      rationale: Because fingerprints include the day, this equals daily unique visitors summed over the window with one query; NULL fingerprints (legacy clicks) are ignored by COUNT(DISTINCT), keeping totals unchanged.
+      impact: LOW
+  apiOperations:
+    - method: GET
+      path: /api/v1/links/{code}/stats
+      summary: Response gains uniqueVisitors (int64); all existing fields unchanged
+      responses: [200, 400, 404]
+      change: MODIFIED
+  dataModel:
+    - table: click_event
+      change: ALTER
+      columns:
+        - { name: visitor_hash, type: CHAR(64), nullable: true, personalData: PSEUDONYMISED }

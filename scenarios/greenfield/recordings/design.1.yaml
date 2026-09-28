@@ -1,0 +1,109 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+response:
+  summary: |2
+    A new com.example.shortener.abuse package. POST /api/v1/links/{code}/reports (AbuseReportController) validates the reason and hands the report to AbuseReportService, which looks the link up through LinkService, derives the reporter's pseudonym with ReporterFingerprint, stores one row per link and reporter in the new abuse_report table, counts the distinct reporters inside the takedown window and, when TakedownPolicy requires it, disables the link through LinkService.disable. Unknown and disabled links surface as the existing link-not-found and link-gone problems.
+  components:
+    - name: AbuseReportController
+      location: com.example.shortener.abuse.api
+      isNew: true
+      responsibility: "POST /api/v1/links/{code}/reports: validates the reason (AbuseReportRequest), passes the client address on and answers 202 without a body"
+    - name: AbuseReportService
+      location: com.example.shortener.abuse
+      isNew: true
+      responsibility: "report(code, reason, clientAddress): 404 for unknown and 410 for disabled links, stores the report, counts reporters since TakedownPolicy.windowStart(now) and disables the link when TakedownPolicy.requiresTakedown(count)"
+    - name: TakedownPolicy
+      location: com.example.shortener.abuse
+      isNew: true
+      responsibility: "The takedown rule of decision D-2 behind a stable interface: Instant windowStart(Instant now) is the earliest report time that counts, boolean requiresTakedown(long distinctReporters) decides"
+    - name: ReporterFingerprint
+      location: com.example.shortener.abuse
+      isNew: true
+      responsibility: "String of(long linkId, String clientAddress): keyed, per-link reporter pseudonym of decision D-1"
+    - name: AbuseReportRepository
+      location: com.example.shortener.abuse
+      isNew: true
+      responsibility: "void save(AbuseReport) inserts the report or refreshes the reporter's existing row; long countReportersSince(long linkId, Instant since)"
+    - name: "AbuseReport, AbuseReason"
+      location: com.example.shortener.abuse
+      isNew: true
+      responsibility: "Report record (linkId, reporterHash, reason, reportedAt) and the reasons SPAM, PHISHING, MALWARE, OTHER"
+    - name: LinkService
+      location: com.example.shortener.link
+      isNew: false
+      responsibility: "Unchanged: get(code) looks links up, disable(code) performs the takedown"
+  decisions:
+    - id: D-1
+      title: Reporter identity without personal data
+      context: "Distinct reporters must be recognised, including one who reports the same link again, but client addresses are personal data and must not be stored."
+      alternatives:
+        - Store the client address and count distinct addresses
+        - Unkeyed SHA-256 of the client address
+        - "Keyed HMAC-SHA256 of the link id and the client's network (IPv4 address or IPv6 /64), one row per link and reporter"
+      choice: "Keyed HMAC-SHA256 of the link id and the client's network (IPv4 address or IPv6 /64), one row per link and reporter"
+      rationale: "Nothing personal is stored. Without the key the small IPv4 space cannot be brute-forced, and the link id in the input makes the same person unlinkable across links. Grouping IPv6 by /64 stops one subscriber from posing as many reporters. A unique (link_id, reporter_hash) row that repeated reports refresh makes every reporter count once by construction. The key comes from shortener.abuse.reporter-hash-secret (ABUSE_REPORTER_HASH_SECRET) and must be the same on every instance; without it a random per-process key is used and a warning logged."
+      impact: MEDIUM
+    - id: D-2
+      title: Automatic takedown rule
+      context: "Disabling a link is an automated action against a customer's link that only an operator can reverse. The rule must not let a single reporter take a link down, yet react quickly to phishing and malware."
+      alternatives:
+        - Disable on the first report
+        - "No automatic action; queue reports for manual moderation"
+        - "Weighted score per reason (e.g. MALWARE counts double)"
+        - "Disable once 3 distinct reporters reported the link within a sliding 24-hour window, fixed in code"
+      choice: "Disable once 3 distinct reporters reported the link within a sliding 24-hour window, fixed in code"
+      rationale: "This is the rule the requirement states. Several independent reporters make a single malicious reporter powerless, and the sliding window keeps old, unrelated reports from adding up. Every reason counts the same because reporters cannot be trusted to classify abuse. Constants in TakedownPolicy are the simplest implementation that meets the requirement."
+      impact: HIGH
+    - id: D-3
+      title: Takedown mechanism
+      context: "A taken-down link must stop redirecting at once and keep its history, like a link its owner disabled."
+      alternatives:
+        - New SUSPENDED link status with its own redirect behaviour and problem type
+        - "Reuse LinkService.disable: status DISABLED, disabledAt set, redirect answers 410 link-gone"
+      choice: "Reuse LinkService.disable: status DISABLED, disabledAt set, redirect answers 410 link-gone"
+      rationale: "No change to the link model, the redirect path or the public contract, and disabling is idempotent, so concurrent reports that both reach the threshold are harmless. Links are looked up with LinkService.get, not resolve, which would count reports as redirects. Telling automatic from owner takedowns apart is left to moderator tooling (out of scope); every takedown is logged and counted in shortener.abuse.takedowns."
+      impact: MEDIUM
+    - id: D-4
+      title: Response semantics
+      context: "Reporters need confirmation that a report arrived, but the response must not help anyone probe how close a link is to a takedown."
+      alternatives:
+        - "201 Created with a report resource and id"
+        - "200 OK with the current report count"
+        - "202 Accepted without a body, identical for new, repeated and threshold-reaching reports"
+      choice: "202 Accepted without a body, identical for new, repeated and threshold-reaching reports"
+      rationale: "A report is accepted for processing and has no resource of its own to address; revealing counts would let coordinated reporters time their reports. Errors reuse existing problem types: validation-failed (400) for a missing or unknown reason, link-not-found (404) and link-gone (410)."
+      impact: LOW
+  apiOperations:
+    - method: POST
+      path: /api/v1/links/{code}/reports
+      summary: "Report a link for abuse (reason SPAM, PHISHING, MALWARE or OTHER); 202 without a body"
+      responses:
+        - 202
+        - 400
+        - 404
+        - 410
+      change: NEW
+  dataModel:
+    - table: abuse_report
+      change: CREATE
+      columns:
+        - name: id
+          type: BIGINT
+          nullable: false
+          personalData: NONE
+        - name: link_id
+          type: BIGINT
+          nullable: false
+          personalData: NONE
+        - name: reporter_hash
+          type: "CHAR(64)"
+          nullable: false
+          personalData: PSEUDONYMISED
+        - name: reason
+          type: "VARCHAR(16)"
+          nullable: false
+          personalData: NONE
+        - name: reported_at
+          type: TIMESTAMP WITH TIME ZONE
+          nullable: false
+          personalData: NONE

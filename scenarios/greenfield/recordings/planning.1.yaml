@@ -1,0 +1,118 @@
+# Recorded plan proposal. The engine validates it, adds mandatory gates and prerequisite edges, and
+# only then turns it into the executable dependency graph.
+response:
+  rationale: |2
+    Storage, the takedown rule and the documentation depend only on the design and on disjoint files, so they run as three parallel branches. The reporting flow joins storage and rule; it builds on the interfaces fixed in the design overview. Every task reads only the design parts it needs (the rule alone reads decision D-2), so a later design revision redoes only the work derived from what changed. Tests follow the reporting flow; the build, the security review and the API review run in parallel before release sign-off.
+  tasks:
+    - id: design
+      title: Design abuse reporting and the automatic takedown
+      capability: design
+      goal: "Decide reporter identity, takedown rule, takedown mechanism, API contract and schema"
+      maxAttempts: 2
+    - id: impl-store
+      title: Persist abuse reports under a keyed reporter pseudonym
+      capability: implement
+      dependsOn:
+        - design
+      goal: "Add the abuse_report table, the report model, its repository and the reporter fingerprint"
+      inputs:
+        - design/overview
+        - design/data-model
+        - decision/D-1
+      scope:
+        - src/main/resources/db/migration/V2__create_abuse_report.sql
+        - src/main/java/com/example/shortener/abuse/AbuseReason.java
+        - src/main/java/com/example/shortener/abuse/AbuseReport.java
+        - src/main/java/com/example/shortener/abuse/AbuseReportRepository.java
+        - src/main/java/com/example/shortener/abuse/ReporterFingerprint.java
+        - src/main/resources/application.yml
+      maxAttempts: 3
+    - id: impl-policy
+      title: Implement the takedown rule
+      capability: implement
+      dependsOn:
+        - design
+      goal: "Implement TakedownPolicy exactly as decision D-2 states, behind the interface in the design overview"
+      inputs:
+        - design/overview
+        - decision/D-2
+      scope:
+        - src/main/java/com/example/shortener/abuse/TakedownPolicy.java
+      maxAttempts: 3
+    - id: docs
+      title: "Document the report endpoint, takedown rule and configuration"
+      capability: document
+      dependsOn:
+        - design
+      goal: "Add the endpoint to the OpenAPI document and describe reporting, takedown and the key in the README"
+      inputs:
+        - design/api-contract
+        - decision/D-1
+        - decision/D-2
+        - decision/D-4
+      scope:
+        - src/main/resources/static/openapi.yaml
+        - README.md
+      maxAttempts: 2
+    - id: impl-api
+      title: Report endpoint and takedown flow
+      capability: implement
+      dependsOn:
+        - impl-store
+        - impl-policy
+      goal: "Add AbuseReportService and the POST /api/v1/links/{code}/reports endpoint; disable links through LinkService"
+      inputs:
+        - design/overview
+        - design/api-contract
+        - decision/D-3
+        - decision/D-4
+      scope:
+        - src/main/java/com/example/shortener/abuse/AbuseReportService.java
+        - "src/main/java/com/example/shortener/abuse/api/**"
+      maxAttempts: 3
+    - id: tests
+      title: Tests for every acceptance criterion
+      capability: author-tests
+      dependsOn:
+        - impl-api
+      goal: "Unit and integration tests for AC-1..AC-6, including the takedown rule and reporter privacy"
+      inputs:
+        - design/overview
+        - design/api-contract
+        - decision/D-1
+        - decision/D-2
+        - decision/D-4
+      scope:
+        - "src/test/java/**"
+      maxAttempts: 2
+    - id: verify
+      title: Run the full test suite against the changed workspace
+      capability: verify-build
+      dependsOn:
+        - tests
+        - docs
+      verifies:
+        - impl-store
+        - impl-policy
+        - impl-api
+        - docs
+        - tests
+    - id: security
+      title: Security and compliance review of the aggregate change
+      capability: review-security
+      dependsOn:
+        - tests
+        - docs
+    - id: api-review
+      title: API compatibility and documentation review
+      capability: review-api
+      dependsOn:
+        - tests
+        - docs
+    - id: release
+      title: Release readiness and sign-off
+      capability: assess-release
+      dependsOn:
+        - verify
+        - security
+        - api-review

@@ -1,0 +1,58 @@
+# Recorded re-analysis after the product owner answered Q-1, Q-2, A-1 and AC-3, replayed by the offline
+# provider. 'expect' pins the option answers it was recorded for: any other answer stops the run
+# (REASONING_UNAVAILABLE) instead of replaying an analysis made for different decisions. The free-text
+# answer to AC-3 is reflected in AC-3 and AC-4 below.
+expect:
+  answers:
+    Q-1: per-link
+    Q-2: "410"
+    A-1: reject
+response:
+  title: Optional per-link expiry for short links
+  changeType: ENHANCEMENT
+  summary: "Clients may give a link an expiry when they create it (Q-1: per-link, in the future and at most 365 days ahead). From that instant on, following the link answers 410 Gone like a disabled link and records no click (Q-2, AC-3); the link itself stays readable and keeps its statistics. Links without an expiry, including every link that exists today, never expire (A-1 rejected)."
+  acceptanceCriteria:
+    - id: AC-1
+      statement: "POST /api/v1/links accepts an optional expiresAt (an ISO-8601 instant); the POST response and GET /api/v1/links/{code} return it, and return null for a link without one"
+      verification: "API integration tests creating links with and without expiresAt; repository round trip"
+    - id: AC-2
+      statement: "An expiresAt that is not an ISO-8601 instant, not in the future, or more than 365 days ahead is rejected with 400 and no link is created"
+      verification: Parameterised API tests on both sides of both bounds and for values in other formats
+    - id: AC-3
+      statement: "From its expiresAt on, GET /{code} answers 410 Gone with the link-gone problem type and records no click; before that instant it redirects with 302 exactly as today"
+      verification: "API integration test around the expiry instant; unit tests of the expiry check and the redirect outcome"
+    - id: AC-4
+      statement: "An expired link is still returned by GET /api/v1/links/{code}, and GET /api/v1/links/{code}/stats keeps reporting its clicks"
+      verification: API integration test on an expired link with recorded clicks
+    - id: AC-5
+      statement: "Links without expiresAt, including every link created before this change, never expire and redirect exactly as before"
+      verification: "API integration test on a row stored without an expiry; unit test of the expiry check"
+  constraints:
+    - "Existing links are not modified: no backfill and no default expiry (A-1 rejected)"
+    - "Additive API change only; no request property becomes required"
+    - "An Idempotency-Key replay must carry the same expiresAt; another expiry is a different payload (422)"
+    - "Errors are RFC 9457 problem documents, like every other error of the API"
+  assumptions:
+    - id: A-2
+      statement: "Expiry is evaluated with the application clock (UTC) when a link is followed; no background job is needed"
+      impact: LOW
+      confirmed: false
+  outOfScope:
+    - "Retroactive or default expiry of existing links (rejected by the product owner, A-1)"
+    - Changing or removing an expiry after creation
+    - Deleting expired links or their click history
+    - Redirecting expired links to a notice page
+  openQuestions: []
+  risks:
+    - id: R-1
+      description: Clients that parse link responses strictly may reject the new expiresAt field
+      severity: LOW
+      mitigation: "Additive, nullable field, documented in openapi.yaml"
+    - id: R-2
+      description: Clock drift between instances makes a link expire slightly early or late
+      severity: LOW
+      mitigation: "Instances run on synchronised UTC clocks; expiry is checked at redirect time"
+    - id: R-3
+      description: "An expired link answers like a disabled one, so the status code alone does not tell clients which it is"
+      severity: LOW
+      mitigation: The problem detail states when the link expired

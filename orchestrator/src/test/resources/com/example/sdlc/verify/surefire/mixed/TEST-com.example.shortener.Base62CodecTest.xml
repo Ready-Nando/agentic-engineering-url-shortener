@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report.xsd" version="3.0.2" name="com.example.shortener.Base62CodecTest" time="0.031" tests="2" errors="0" skipped="0" failures="0">
+  <properties>
+    <property name="java.version" value="21.0.8"/>
+  </properties>
+  <testcase name="roundTrips" classname="com.example.shortener.Base62CodecTest" time="0.012"/>
+  <testcase name="encodesZero" classname="com.example.shortener.Base62CodecTest" time="0.001"/>
+</testsuite>

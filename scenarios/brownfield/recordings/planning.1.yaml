@@ -1,0 +1,67 @@
+# Recorded plan proposal (first attempt). The engine validates it, adds mandatory gates and prerequisite
+# edges, and only then turns it into the executable dependency graph. This attempt forgets that the
+# documentation change also needs the security review; the plan-valid gate rejects it.
+response:
+  rationale: >
+    Capture-side and query-side changes both touch ClickEventRepository, so they run in sequence;
+    documentation depends only on the design and proceeds in parallel with implementation. The build,
+    the security review and the API review are independent checks that run in parallel before sign-off.
+  tasks:
+    - id: design
+      title: Design visitor fingerprinting and the statistics extension
+      capability: design
+      goal: Decide identity, key management, counting semantics, API and schema changes
+      maxAttempts: 2
+    - id: impl-capture
+      title: Record a privacy-preserving visitor fingerprint with every click
+      capability: implement
+      dependsOn: [design]
+      goal: Add the fingerprint component, persist it with each click and pass request data from the redirect endpoint
+      inputs: [design/data-model, decision/D-1, decision/D-2]
+      scope:
+        - src/main/java/com/example/shortener/analytics/**
+        - src/main/java/com/example/shortener/link/api/RedirectController.java
+        - src/main/resources/db/migration/**
+        - src/main/resources/application.yml
+      maxAttempts: 3
+    - id: impl-stats
+      title: Report unique visitors in link statistics
+      capability: implement
+      dependsOn: [impl-capture]
+      goal: Count distinct fingerprints in the statistics window and expose uniqueVisitors
+      inputs: [design/api-contract, decision/D-3]
+      scope:
+        - src/main/java/com/example/shortener/analytics/**
+      maxAttempts: 3
+    - id: docs
+      title: Document the new statistics field and key configuration
+      capability: document
+      dependsOn: [design]
+      inputs: [design/api-contract, decision/D-2, decision/D-3]
+      scope:
+        - src/main/resources/static/openapi.yaml
+        - README.md
+    - id: tests
+      title: Tests for every acceptance criterion
+      capability: author-tests
+      dependsOn: [impl-stats]
+      inputs: [design/api-contract]
+      scope:
+        - src/test/java/**
+    - id: verify
+      title: Run the full test suite against the changed workspace
+      capability: verify-build
+      dependsOn: [tests, docs]
+      verifies: [impl-capture, impl-stats, tests]
+    - id: security
+      title: Security and compliance review of the aggregate change
+      capability: review-security
+      dependsOn: [tests]
+    - id: api-review
+      title: API compatibility and documentation review
+      capability: review-api
+      dependsOn: [tests, docs]
+    - id: release
+      title: Release readiness and sign-off
+      capability: assess-release
+      dependsOn: [verify, security, api-review]

@@ -1,0 +1,145 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+response:
+  summary: Store an optional expiry with each link
+  rationale: "D-1: a new migration V2 adds a nullable expires_at column (V1 untouched, no backfill, so existing links never expire). ShortLink carries the value and decides expiry from it (D-3); LinkRepository writes and reads it with the same UTC microsecond truncation as created_at."
+  declaredRisk: MEDIUM
+  changes:
+    - op: CREATE
+      path: src/main/resources/db/migration/V2__add_expires_at_to_short_link.sql
+      contentFile: files/V2__add_expires_at_to_short_link.sql
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/ShortLink.java
+      find: |2
+        public record ShortLink(
+                long id,
+                String code,
+                String targetUrl,
+                LinkStatus status,
+                Instant createdAt,
+                @Nullable Instant disabledAt) {
+
+            public boolean isActive() {
+                return status == LinkStatus.ACTIVE;
+            }
+        }
+      replace: |2
+        /**
+         * @param expiresAt instant from which the link no longer redirects, or null if it never expires
+         */
+        public record ShortLink(
+                long id,
+                String code,
+                String targetUrl,
+                LinkStatus status,
+                Instant createdAt,
+                @Nullable Instant expiresAt,
+                @Nullable Instant disabledAt) {
+
+            public boolean isActive() {
+                return status == LinkStatus.ACTIVE;
+            }
+
+            /**
+             * Expiry is derived from {@code expiresAt} whenever it matters instead of being stored as a status, so
+             * it takes effect at exactly that instant without a background job.
+             */
+            public boolean isExpiredAt(Instant instant) {
+                return expiresAt != null && !instant.isBefore(expiresAt);
+            }
+        }
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkRepository.java
+      find: |2
+            public ShortLink insert(String code, String targetUrl, Instant createdAt,
+                                    @Nullable String idempotencyKey, @Nullable String requestHash) {
+                OffsetDateTime storedCreatedAt = toUtc(createdAt);
+                KeyHolder keyHolder = new GeneratedKeyHolder();
+                jdbc.sql("""
+                                INSERT INTO short_link (code, target_url, status, created_at, idempotency_key, request_hash)
+                                VALUES (:code, :targetUrl, :status, :createdAt, :idempotencyKey, :requestHash)
+                                """)
+                        .param("code", code)
+                        .param("targetUrl", targetUrl)
+                        .param("status", LinkStatus.ACTIVE.name())
+                        .param("createdAt", storedCreatedAt)
+                        .param("idempotencyKey", idempotencyKey)
+                        .param("requestHash", requestHash)
+                        .update(keyHolder, "id");
+                long id = keyHolder.getKeyAs(Long.class);
+                return new ShortLink(id, code, targetUrl, LinkStatus.ACTIVE, storedCreatedAt.toInstant(), null);
+            }
+      replace: |2
+            public ShortLink insert(String code, String targetUrl, Instant createdAt, @Nullable Instant expiresAt,
+                                    @Nullable String idempotencyKey, @Nullable String requestHash) {
+                OffsetDateTime storedCreatedAt = toUtc(createdAt);
+                OffsetDateTime storedExpiresAt = expiresAt == null ? null : toUtc(expiresAt);
+                KeyHolder keyHolder = new GeneratedKeyHolder();
+                jdbc.sql("""
+                                INSERT INTO short_link (code, target_url, status, created_at, expires_at, idempotency_key, request_hash)
+                                VALUES (:code, :targetUrl, :status, :createdAt, :expiresAt, :idempotencyKey, :requestHash)
+                                """)
+                        .param("code", code)
+                        .param("targetUrl", targetUrl)
+                        .param("status", LinkStatus.ACTIVE.name())
+                        .param("createdAt", storedCreatedAt)
+                        .param("expiresAt", storedExpiresAt)
+                        .param("idempotencyKey", idempotencyKey)
+                        .param("requestHash", requestHash)
+                        .update(keyHolder, "id");
+                long id = keyHolder.getKeyAs(Long.class);
+                return new ShortLink(id, code, targetUrl, LinkStatus.ACTIVE, storedCreatedAt.toInstant(),
+                        toInstant(storedExpiresAt), null);
+            }
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkRepository.java
+      find: |2
+                                SELECT id, code, target_url, status, created_at, disabled_at
+                                FROM short_link
+                                WHERE code = :code
+      replace: |2
+                                SELECT id, code, target_url, status, created_at, expires_at, disabled_at
+                                FROM short_link
+                                WHERE code = :code
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkRepository.java
+      find: |2
+        SELECT id, code, target_url, status, created_at, disabled_at, request_hash
+      replace: |2
+        SELECT id, code, target_url, status, created_at, expires_at, disabled_at, request_hash
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkRepository.java
+      find: |2
+            private static ShortLink mapLink(ResultSet rs, int rowNum) throws SQLException {
+                OffsetDateTime disabledAt = rs.getObject("disabled_at", OffsetDateTime.class);
+                return new ShortLink(
+                        rs.getLong("id"),
+                        rs.getString("code"),
+                        rs.getString("target_url"),
+                        LinkStatus.valueOf(rs.getString("status")),
+                        rs.getObject("created_at", OffsetDateTime.class).toInstant(),
+                        disabledAt == null ? null : disabledAt.toInstant());
+            }
+      replace: |2
+            private static ShortLink mapLink(ResultSet rs, int rowNum) throws SQLException {
+                return new ShortLink(
+                        rs.getLong("id"),
+                        rs.getString("code"),
+                        rs.getString("target_url"),
+                        LinkStatus.valueOf(rs.getString("status")),
+                        rs.getObject("created_at", OffsetDateTime.class).toInstant(),
+                        toInstant(rs.getObject("expires_at", OffsetDateTime.class)),
+                        toInstant(rs.getObject("disabled_at", OffsetDateTime.class)));
+            }
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkRepository.java
+      find: |2
+                return instant.truncatedTo(ChronoUnit.MICROS).atOffset(ZoneOffset.UTC);
+            }
+      replace: |2
+                return instant.truncatedTo(ChronoUnit.MICROS).atOffset(ZoneOffset.UTC);
+            }
+
+            private static @Nullable Instant toInstant(@Nullable OffsetDateTime timestamp) {
+                return timestamp == null ? null : timestamp.toInstant();
+            }

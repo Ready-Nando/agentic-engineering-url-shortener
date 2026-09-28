@@ -1,0 +1,115 @@
+# Recorded design proposal, replayed by the offline provider. The design-quality and design-approval
+# gates evaluate it like live output; the data model change requires an architect's sign-off.
+response:
+  summary: "Links get an optional expires_at that is set only at creation. LinkService checks it against the service clock (in the future, at most 365 days ahead) and, when a link is followed, treats an expired link like a disabled one: 410 link-gone and no click. Link responses expose expiresAt; links without one behave exactly as before."
+  components:
+    - name: ShortLink
+      responsibility: Carry expiresAt and decide whether the link has expired at an instant
+      location: com.example.shortener.link
+      isNew: false
+    - name: LinkRepository
+      responsibility: Store and read expires_at
+      location: com.example.shortener.link
+      isNew: false
+    - name: LinkService
+      responsibility: "Validate the expiry on creation, include it in the idempotency hash, reject expired links on redirect"
+      location: com.example.shortener.link
+      isNew: false
+    - name: InvalidExpiryException
+      responsibility: "Out-of-range expiresAt, mapped to the invalid-expiry problem"
+      location: com.example.shortener.link
+      isNew: true
+    - name: LinkGoneException
+      responsibility: "Also raised for expired links, with a detail naming the expiry"
+      location: com.example.shortener.link
+      isNew: false
+    - name: CreateLinkRequest / LinkController / LinkResponse
+      responsibility: Accept expiresAt as a strictly parsed date-time with offset and return it
+      location: com.example.shortener.link.api
+      isNew: false
+    - name: ApiExceptionHandler
+      responsibility: "Map InvalidExpiryException to a 400 problem document; title link-gone for both of its causes"
+      location: com.example.shortener.web
+      isNew: false
+  decisions:
+    - id: D-1
+      title: Expiry model and storage
+      context: "The product owner chose an optional per-link expiry (Q-1) and rejected expiring existing links (A-1)."
+      alternatives:
+        - "Nullable expires_at column on short_link, set only at creation; NULL never expires"
+        - Global lifetime computed from created_at and a setting
+        - Separate link_expiry table
+      choice: "Nullable expires_at column on short_link, set only at creation; NULL never expires"
+      rationale: "It is what was asked for. An additive nullable column needs no backfill, so every existing row keeps never expiring by construction, and it is read with the link at no extra cost."
+      impact: MEDIUM
+    - id: D-2
+      title: Response for an expired link
+      context: "Q-2 was answered with 410 Gone like disabled links; clients already handle the link-gone problem."
+      alternatives:
+        - "410 with the existing link-gone problem type; the detail names the expiry instant"
+        - "410 with a new link-expired problem type"
+        - "404 link-not-found"
+      choice: "410 with the existing link-gone problem type; the detail names the expiry instant"
+      rationale: "Clients handle one problem type for a link that no longer redirects. RFC 9457 wants one title for every occurrence of a type, so the title changes from 'Link disabled' to 'Link gone', which is true of both causes; the detail tells expiry and disabling apart. A disabled link reports as disabled even if it has also expired. Expired redirects get their own metric outcome."
+      impact: LOW
+    - id: D-3
+      title: When expiry takes effect
+      context: A link must stop redirecting from its expiresAt on.
+      alternatives:
+        - Compare expiresAt with the clock whenever the link is followed
+        - Scheduled job that switches expired links to a new EXPIRED status
+      choice: Compare expiresAt with the clock whenever the link is followed
+      rationale: "Exact to the instant, no scheduler to operate, and no new status value in the API, which clients with strict enums could reject. status keeps meaning 'explicitly disabled'."
+      impact: MEDIUM
+    - id: D-4
+      title: Validating expiresAt
+      context: "expiresAt must be an ISO-8601 date-time with offset, in the future and at most 365 days ahead, measured with the application clock."
+      alternatives:
+        - "Parse the text strictly in LinkController, check the range in LinkService with the injected Clock; new invalid-expiry problem type (400)"
+        - "Instant field read by Jackson, with Bean Validation @Future plus a custom constraint for the upper bound"
+      choice: "Parse the text strictly in LinkController, check the range in LinkService with the injected Clock; new invalid-expiry problem type (400)"
+      rationale: "Jackson also reads epoch seconds into an Instant, which the date-time contract does not allow, and it reports a malformed value as unreadable JSON; parsing the text gives every bad expiry the same invalid-expiry problem. @Future uses the validator's own clock, not the application Clock, so tests and service would disagree, and the upper bound needs custom code anyway. The range is checked in the service like target URL, alias and idempotency key, but only when nothing is replayed: a retry of an accepted request stays a replay after its expiry has passed. Mapping the new exception changes the exception handler, which requires security sign-off."
+      impact: LOW
+  apiOperations:
+    - method: POST
+      path: /api/v1/links
+      summary: "Request accepts an optional expiresAt; response includes expiresAt; 400 invalid-expiry"
+      responses:
+        - 201
+        - 200
+        - 400
+        - 409
+        - 422
+        - 503
+      change: MODIFIED
+    - method: GET
+      path: /api/v1/links/{code}
+      summary: "Response includes expiresAt (null for links that never expire)"
+      responses:
+        - 200
+        - 404
+      change: MODIFIED
+    - method: GET
+      path: /{code}
+      summary: An expired link answers 410 link-gone and records no click
+      responses:
+        - 302
+        - 404
+        - 410
+      change: MODIFIED
+    - method: GET
+      path: /api/v1/links/{code}/stats
+      summary: "Unchanged; still available for expired links"
+      responses:
+        - 200
+        - 400
+        - 404
+      change: UNCHANGED
+  dataModel:
+    - table: short_link
+      change: ALTER
+      columns:
+        - name: expires_at
+          type: TIMESTAMP WITH TIME ZONE
+          nullable: true
+          personalData: NONE

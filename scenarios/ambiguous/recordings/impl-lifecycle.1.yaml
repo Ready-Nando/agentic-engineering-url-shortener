@@ -1,0 +1,261 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+response:
+  summary: Accept expiresAt at creation and stop redirecting expired links
+  rationale: "D-4: LinkController parses expiresAt strictly as a date-time with offset and LinkService checks its range with the service clock after the idempotent replay lookup; both raise InvalidExpiryException, mapped to a new invalid-expiry 400 problem (one new handler in ApiExceptionHandler). The expiry is part of the idempotency hash only when present, so hashes stored for earlier requests stay valid. D-2/D-3: resolve() reuses LinkGoneException for expired links after the disabled check and counts them as shortener.redirects{outcome=expired}; the link-gone title becomes 'Link gone'. The request, command and response gain expiresAt."
+  declaredRisk: MEDIUM
+  changes:
+    - op: CREATE
+      path: src/main/java/com/example/shortener/link/InvalidExpiryException.java
+      contentFile: files/InvalidExpiryException.java
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkGoneException.java
+      find: |2
+        package com.example.shortener.link;
+
+        public class LinkGoneException extends RuntimeException {
+
+            public LinkGoneException(String code) {
+                super("Link '" + code + "' has been disabled");
+            }
+        }
+      replace: |2
+        package com.example.shortener.link;
+
+        import java.time.Instant;
+
+        /**
+         * The link exists but no longer redirects, because it was disabled or has expired.
+         */
+        public class LinkGoneException extends RuntimeException {
+
+            public LinkGoneException(String code) {
+                super("Link '" + code + "' has been disabled");
+            }
+
+            public LinkGoneException(String code, Instant expiredAt) {
+                super("Link '" + code + "' expired at " + expiredAt);
+            }
+        }
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/CreateLinkCommand.java
+      find: |2
+        import org.jspecify.annotations.Nullable;
+
+        public record CreateLinkCommand(String targetUrl, @Nullable String alias, @Nullable String idempotencyKey) {
+        }
+      replace: |2
+        import java.time.Instant;
+        import org.jspecify.annotations.Nullable;
+
+        /**
+         * @param expiresAt when the link stops redirecting, or null for a link that never expires
+         */
+        public record CreateLinkCommand(String targetUrl, @Nullable String alias, @Nullable Instant expiresAt,
+                                        @Nullable String idempotencyKey) {
+        }
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkService.java
+      find: |2
+        import java.time.Clock;
+      replace: |2
+        import java.time.Clock;
+        import java.time.Duration;
+        import java.time.Instant;
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkService.java
+      find: |2
+            private static final Pattern IDEMPOTENCY_KEY_PATTERN = Pattern.compile("^[A-Za-z0-9_-]{1,64}$");
+      replace: |2
+            private static final Pattern IDEMPOTENCY_KEY_PATTERN = Pattern.compile("^[A-Za-z0-9_-]{1,64}$");
+            private static final Duration MAX_LIFETIME = Duration.ofDays(365);
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkService.java
+      find: |2
+            private final Counter redirectsGone;
+      replace: |2
+            private final Counter redirectsGone;
+            private final Counter redirectsExpired;
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkService.java
+      find: |2
+                this.redirectsGone = meterRegistry.counter("shortener.redirects", "outcome", "gone");
+      replace: |2
+                this.redirectsGone = meterRegistry.counter("shortener.redirects", "outcome", "gone");
+                this.redirectsExpired = meterRegistry.counter("shortener.redirects", "outcome", "expired");
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkService.java
+      find: |2
+                }
+                CreateLinkResult result = command.alias() != null
+      replace: |2
+                }
+                // Only after the replay lookup: the retry of an accepted request is answered as a replay even once its
+                // expiry is no longer in the future.
+                if (command.expiresAt() != null) {
+                    validateExpiry(command.expiresAt());
+                }
+                CreateLinkResult result = command.alias() != null
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkService.java
+      find: |2
+             * @throws LinkGoneException if the link exists but was disabled
+      replace: |2
+             * @throws LinkGoneException if the link exists but was disabled or has expired
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkService.java
+      find: |2
+                    redirectsGone.increment();
+                    throw new LinkGoneException(code);
+                }
+      replace: |2
+                    redirectsGone.increment();
+                    throw new LinkGoneException(code);
+                }
+                if (link.get().isExpiredAt(clock.instant())) {
+                    redirectsExpired.increment();
+                    throw new LinkGoneException(code, link.get().expiresAt());
+                }
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkService.java
+      find: "    private CreateLinkResult insertWithAlias("
+      replace: |2-
+            // Checked against the service clock: @Future on the request would use the validator's own clock.
+            private void validateExpiry(Instant expiresAt) {
+                Instant now = clock.instant();
+                if (!expiresAt.isAfter(now)) {
+                    throw new InvalidExpiryException("expiresAt must be in the future");
+                }
+                if (expiresAt.isAfter(now.plus(MAX_LIFETIME))) {
+                    throw new InvalidExpiryException("expiresAt must be at most " + MAX_LIFETIME.toDays() + " days in the future");
+                }
+            }
+
+            private CreateLinkResult insertWithAlias(
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkService.java
+      find: |2
+                return linkRepository.insert(code, command.targetUrl(), clock.instant(), command.idempotencyKey(), requestHash);
+      replace: |2
+                return linkRepository.insert(code, command.targetUrl(), clock.instant(), command.expiresAt(),
+                        command.idempotencyKey(), requestHash);
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/LinkService.java
+      find: |2
+                // Neither a parsed URL nor an alias can contain a line feed, so the encoding is unambiguous.
+                String canonical = command.targetUrl() + "\n" + (command.alias() == null ? "" : command.alias());
+      replace: |2
+                // Neither a parsed URL nor an alias can contain a line feed, so the encoding is unambiguous. The expiry
+                // is only appended when present, so requests without one hash exactly as before it existed.
+                String canonical = command.targetUrl() + "\n" + (command.alias() == null ? "" : command.alias())
+                        + (command.expiresAt() == null ? "" : "\n" + command.expiresAt());
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/api/CreateLinkRequest.java
+      find: |2
+         * @param alias optional custom code; its format and reserved words are checked by
+         *              {@link com.example.shortener.link.AliasPolicy}
+         */
+        public record CreateLinkRequest(
+                @NotBlank @Size(max = 2048) String url,
+                @Nullable String alias) {
+      replace: |2
+         * @param alias     optional custom code; its format and reserved words are checked by
+         *                  {@link com.example.shortener.link.AliasPolicy}
+         * @param expiresAt optional date-time with offset from which the link stops redirecting; kept as text
+         *                  so that {@link LinkController} can parse it strictly, and its range is checked by
+         *                  {@link com.example.shortener.link.LinkService}
+         */
+        public record CreateLinkRequest(
+                @NotBlank @Size(max = 2048) String url,
+                @Nullable String alias,
+                @Nullable String expiresAt) {
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/api/LinkController.java
+      find: |2
+        import com.example.shortener.link.CreateLinkResult;
+      replace: |2
+        import com.example.shortener.link.CreateLinkResult;
+        import com.example.shortener.link.InvalidExpiryException;
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/api/LinkController.java
+      find: |2
+        import java.net.URI;
+      replace: |2
+        import java.net.URI;
+        import java.time.Instant;
+        import java.time.OffsetDateTime;
+        import java.time.format.DateTimeParseException;
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/api/LinkController.java
+      find: "new CreateLinkCommand(request.url(), request.alias(), idempotencyKey)"
+      replace: "new CreateLinkCommand(request.url(), request.alias(), parseExpiry(request.expiresAt()), idempotencyKey)"
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/api/LinkController.java
+      find: |2
+            @DeleteMapping("/{code}")
+            @ResponseStatus(HttpStatus.NO_CONTENT)
+            public void disable(@PathVariable String code) {
+                linkService.disable(code);
+            }
+      replace: |2
+            @DeleteMapping("/{code}")
+            @ResponseStatus(HttpStatus.NO_CONTENT)
+            public void disable(@PathVariable String code) {
+                linkService.disable(code);
+            }
+
+            // Parsed here rather than by Jackson, which would also read epoch seconds ("1775000000") into an Instant.
+            // The contract is a date-time with offset, and any other format is an invalid expiry.
+            private static @Nullable Instant parseExpiry(@Nullable String expiresAt) {
+                if (expiresAt == null) {
+                    return null;
+                }
+                try {
+                    return OffsetDateTime.parse(expiresAt).toInstant();
+                } catch (DateTimeParseException e) {
+                    throw new InvalidExpiryException(
+                            "expiresAt must be an ISO-8601 date-time with offset, such as 2027-01-01T00:00:00Z");
+                }
+            }
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/api/LinkResponse.java
+      find: |2
+                Instant createdAt,
+                @Nullable Instant disabledAt) {
+      replace: |2
+                Instant createdAt,
+                @Nullable Instant expiresAt,
+                @Nullable Instant disabledAt) {
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/api/LinkResponse.java
+      find: |2
+                        link.createdAt(),
+      replace: |2
+                        link.createdAt(),
+                        link.expiresAt(),
+    - op: EDIT
+      path: src/main/java/com/example/shortener/web/ApiExceptionHandler.java
+      find: |2
+        import com.example.shortener.link.InvalidAliasException;
+      replace: |2
+        import com.example.shortener.link.InvalidAliasException;
+        import com.example.shortener.link.InvalidExpiryException;
+    - op: EDIT
+      path: src/main/java/com/example/shortener/web/ApiExceptionHandler.java
+      find: |2
+                return problem(HttpStatus.BAD_REQUEST, "invalid-idempotency-key", "Invalid idempotency key", e.getMessage());
+            }
+      replace: |2
+                return problem(HttpStatus.BAD_REQUEST, "invalid-idempotency-key", "Invalid idempotency key", e.getMessage());
+            }
+
+            @ExceptionHandler(InvalidExpiryException.class)
+            ProblemDetail invalidExpiry(InvalidExpiryException e) {
+                return problem(HttpStatus.BAD_REQUEST, "invalid-expiry", "Invalid expiry", e.getMessage());
+            }
+    - op: EDIT
+      path: src/main/java/com/example/shortener/web/ApiExceptionHandler.java
+      find: |2
+                return problem(HttpStatus.GONE, "link-gone", "Link disabled", e.getMessage());
+      replace: |2
+                return problem(HttpStatus.GONE, "link-gone", "Link gone", e.getMessage());

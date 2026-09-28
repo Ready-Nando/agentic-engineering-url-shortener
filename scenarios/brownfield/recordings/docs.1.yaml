@@ -1,0 +1,45 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+response:
+  summary: Document uniqueVisitors and the fingerprint key
+  rationale: "The statistics schema is the public contract; operators need to know how to supply the key."
+  declaredRisk: LOW
+  changes:
+    - op: EDIT
+      path: src/main/resources/static/openapi.yaml
+      find: |2
+              required: [code, totalClicks, window, clicksInWindow, daily, topReferrers]
+      replace: |2
+              required: [code, totalClicks, window, clicksInWindow, uniqueVisitors, daily, topReferrers]
+    - op: EDIT
+      path: src/main/resources/static/openapi.yaml
+      find: |2
+                clicksInWindow:
+                  type: integer
+                  format: int64
+                daily:
+      replace: |2
+                clicksInWindow:
+                  type: integer
+                  format: int64
+                uniqueVisitors:
+                  type: integer
+                  format: int64
+                  description: >
+                    Distinct visitors in the window. A visitor is a keyed hash of client address and user agent
+                    scoped to one UTC day, so a person returning on another day counts again. Clicks recorded
+                    before fingerprinting was introduced are not counted here but are included in the click totals.
+                daily:
+    - op: EDIT
+      path: README.md
+      find: "**Analytics failure isolation.**"
+      replace: |2-
+        **Unique visitors.** Statistics include `uniqueVisitors`: the number of distinct visitor
+        fingerprints in the window. A fingerprint is an HMAC-SHA256 of the UTC day, the client address and
+        the user agent, so no address or user agent is stored and the same person cannot be linked across
+        days. Set the key with the `VISITOR_HASH_SECRET` environment variable
+        (`shortener.analytics.visitor-hash-secret`); without it a random per-process key is used and counts
+        restart with the process. Behind a reverse proxy, configure `server.forward-headers-strategy` so the
+        client address is the real one. Clicks recorded before fingerprinting existed count as clicks only.
+
+        **Analytics failure isolation.**

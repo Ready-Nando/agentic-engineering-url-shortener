@@ -1,0 +1,159 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+response:
+  summary: "Document expiresAt, the invalid-expiry problem and the behaviour of expired links"
+  rationale: "openapi.yaml is the public contract: expiresAt is added to the request (optional, nullable) and to the Link schema, and the 400 and 410 descriptions name the new cases. The README gains the example, the error type, the design note and the updated limitation."
+  declaredRisk: LOW
+  changes:
+    - op: EDIT
+      path: src/main/resources/static/openapi.yaml
+      find: |2
+                Creates a link with a generated base62 code, or with the given custom alias.
+
+                Send an `Idempotency-Key` to make retries safe: repeating the request with the same key and
+                the same payload returns the originally created link with status 200 and
+                `Idempotent-Replayed: true`. Reusing a key with a different payload is rejected with 422.
+      replace: |2
+                Creates a link with a generated base62 code, or with the given custom alias.
+
+                Set `expiresAt` to make the link expire: from that instant on, following it answers 410 Gone.
+                It must lie in the future and at most 365 days ahead. Links created without it never expire.
+
+                Send an `Idempotency-Key` to make retries safe: repeating the request with the same key and
+                the same payload (URL, alias and expiry) returns the originally created link with status 200
+                and `Idempotent-Replayed: true`. Reusing a key with a different payload is rejected with 422.
+    - op: EDIT
+      path: src/main/resources/static/openapi.yaml
+      find: |2
+                          alias: launch-2026
+              responses:
+      replace: |2
+                          alias: launch-2026
+                      expiring:
+                        value:
+                          url: https://example.org/offers/year-end-sale
+                          expiresAt: '2027-01-01T00:00:00Z'
+              responses:
+    - op: EDIT
+      path: src/main/resources/static/openapi.yaml
+      find: |2
+                    Invalid request. Problem types: `validation-failed` (with `errors`), `malformed-request`,
+                    `invalid-target-url`, `invalid-alias`, `invalid-idempotency-key`.
+      replace: |2
+                    Invalid request. Problem types: `validation-failed` (with `errors`), `malformed-request`,
+                    `invalid-target-url`, `invalid-alias`, `invalid-expiry`, `invalid-idempotency-key`.
+    - op: EDIT
+      path: src/main/resources/static/openapi.yaml
+      find: |2
+              description: Returns active and disabled links alike.
+      replace: |2
+              description: Returns active, disabled and expired links alike.
+    - op: EDIT
+      path: src/main/resources/static/openapi.yaml
+      find: |2
+                and disabled links stop working immediately. Each GET is recorded as a click with only the
+                referrer host; recording failures never fail the redirect. HEAD requests are not counted.
+      replace: |2
+                and disabled or expired links stop working immediately. Each GET is recorded as a click with
+                only the referrer host; recording failures never fail the redirect. HEAD requests are not
+                counted.
+    - op: EDIT
+      path: src/main/resources/static/openapi.yaml
+      find: |2
+                  description: The link has been disabled (`link-gone`)
+      replace: |2
+                  description: The link has been disabled or has expired (`link-gone`); no click is recorded
+    - op: EDIT
+      path: src/main/resources/static/openapi.yaml
+      find: |2
+                  description: Custom code; reserved words such as `api` or `admin` are rejected case-insensitively
+      replace: |2
+                  description: Custom code; reserved words such as `api` or `admin` are rejected case-insensitively
+                expiresAt:
+                  type: string
+                  format: date-time
+                  nullable: true
+                  description: |
+                    Instant from which the link stops redirecting, as a date-time with offset such as
+                    `2027-01-01T00:00:00Z`. Must be in the future and at most 365 days ahead. Any other value,
+                    including a number of epoch seconds, is rejected with `invalid-expiry`. Omit it for a link
+                    that never expires.
+    - op: EDIT
+      path: src/main/resources/static/openapi.yaml
+      find: |2
+                createdAt:
+                  type: string
+                  format: date-time
+                disabledAt:
+      replace: |2
+                createdAt:
+                  type: string
+                  format: date-time
+                expiresAt:
+                  type: string
+                  format: date-time
+                  nullable: true
+                  description: |
+                    When the link stops redirecting; null if it never expires. Expiry does not change
+                    `status`, which only reflects disabling.
+                disabledAt:
+    - op: EDIT
+      path: README.md
+      find: |2
+        # Read it
+      replace: |2
+        # Create a link that stops redirecting when 2027 begins (UTC); expiresAt must be at most 365 days ahead
+        curl -i -X POST localhost:8080/api/v1/links \
+          -H 'Content-Type: application/json' \
+          -d '{"url": "https://example.org/offers/year-end-sale", "expiresAt": "2027-01-01T00:00:00Z"}'
+
+        # Read it
+    - op: EDIT
+      path: README.md
+      find: |2
+        | `invalid-idempotency-key` | 400    | Key not `[A-Za-z0-9_-]{1,64}`                                  |
+      replace: |2
+        | `invalid-idempotency-key` | 400    | Key not `[A-Za-z0-9_-]{1,64}`                                  |
+        | `invalid-expiry`          | 400    | `expiresAt` not a date-time with offset, not in the future, or more than 365 days ahead |
+    - op: EDIT
+      path: README.md
+      find: |2
+        | `link-gone`               | 410    | Redirect to a disabled link                                    |
+      replace: |2
+        | `link-gone`               | 410    | Redirect to a disabled or expired link                         |
+    - op: EDIT
+      path: README.md
+      find: |2
+        hash of the payload (URL and alias) are stored on the link row, under a unique constraint. A repeat
+        with the same key and payload returns the original link with `200` and `Idempotent-Replayed: true`,
+        without creating anything. A repeat with a different payload is rejected with 422. When two requests
+        with the same key race, the loser's insert hits the unique constraint; the service then re-reads the
+        winner's row and answers as a replay (or with 422). Keys do not expire.
+      replace: |2
+        hash of the payload (URL, alias and expiry) are stored on the link row, under a unique constraint.
+        A repeat with the same key and payload returns the original link with `200` and
+        `Idempotent-Replayed: true`, without creating anything. A repeat with a different payload is
+        rejected with 422. When two requests with the same key race, the loser's insert hits the unique
+        constraint; the service then re-reads the winner's row and answers as a replay (or with 422). Keys
+        do not expire.
+    - op: EDIT
+      path: README.md
+      find: "**Persistence.**"
+      replace: |2-
+        **Expiry.** A link created with `expiresAt` stops redirecting at that instant: the redirect answers
+        410 Gone with the same `link-gone` problem as a disabled link (its detail says when the link expired),
+        no click is recorded, and `shortener.redirects{outcome=expired}` is incremented. Expiry is evaluated
+        against the clock on every redirect instead of being stored as a status, so it takes effect exactly on
+        time without a background job; `status` stays `ACTIVE`, and the link, its statistics and its code
+        remain, as for a disabled link. `expiresAt` must be a date-time with offset, in the future and at most
+        365 days ahead; a retry with the same `Idempotency-Key` is still replayed after that expiry has passed.
+        Links created without it, including all links created before expiry existed, never expire.
+
+        **Persistence.**
+    - op: EDIT
+      path: README.md
+      find: |2
+        - Links do not expire, visitors are not de-duplicated, and there is no abuse reporting.
+      replace: |2
+        - Visitors are not de-duplicated, and there is no abuse reporting.
+        - An expiry is fixed at creation: it cannot be added, changed or removed later.

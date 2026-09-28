@@ -1,0 +1,30 @@
+id: brownfield
+kind: BROWNFIELD
+title: "Brownfield: privacy-preserving unique-visitor analytics"
+description: |
+  Enhances the existing click-analytics pipeline. Demonstrates codebase impact analysis over the real
+  shortener source, a compliance rule denying a proposal that would store raw IP addresses, human
+  approval of a schema migration, verification with the real test suite, rework of the defective
+  change with rollback, and API compatibility review.
+targetModule: shortener
+requirement: |
+  Marketing needs to know how many distinct people click a short link, not just how many clicks there
+  were. Add a unique-visitor count to the link statistics endpoint for the selected window. Visitors
+  must be counted without storing IP addresses or user agents and without cookies: derive a daily
+  visitor fingerprint from a keyed hash, so the same visitor counts once per UTC day. Existing
+  statistics fields must keep their current meaning.
+reviewer:
+  name: scenario-reviewer
+  decisions:
+    - match: { kind: GATE_APPROVAL, task: design }
+      decision: APPROVE
+      comment: "Keyed daily HMAC is acceptable to privacy; additive nullable column approved in principle."
+    - match: { kind: CHANGE_APPROVAL, task: impl-capture, rules: [CC-02, SEC-04] }
+      decision: APPROVE
+      comment: "Additive, nullable column; no backfill; safe for existing rows. The redirect handler only passes the request to the recorder; its routing and validation are unchanged."
+    - match: { kind: CHANGE_APPROVAL, task: impl-stats, rules: [SEC-04] }
+      decision: APPROVE
+      comment: "Only the stats response gains the additive uniqueVisitors field; request handling and validation are unchanged."
+    - match: { kind: GATE_APPROVAL, task: release }
+      decision: APPROVE
+      comment: "Evidence reviewed: tests, coverage, security and API checks are green."

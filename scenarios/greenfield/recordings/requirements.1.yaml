@@ -1,0 +1,67 @@
+# Recorded output of the requirement-analysis reasoning step.
+response:
+  title: Abuse reporting with automatic takedown
+  changeType: FEATURE
+  summary: |2
+    Add a public endpoint to report a short link as SPAM, PHISHING, MALWARE or OTHER. Reporters are identified only by a keyed, per-link hash of their network, and each reporter counts once per link. When 3 distinct reporters have reported a link within 24 hours, the link is disabled automatically through the existing soft disable, so its redirect answers 410 Gone.
+  acceptanceCriteria:
+    - id: AC-1
+      statement: "POST /api/v1/links/{code}/reports with reason SPAM, PHISHING, MALWARE or OTHER answers 202 Accepted without a body and records the report"
+      verification: "API integration test for each of the 4 reasons, inspecting the stored row"
+    - id: AC-2
+      statement: "A missing or unknown reason is rejected with 400 (validation-failed), an unknown code with 404 (link-not-found) and an already disabled link with 410 (link-gone); none of them records a report"
+      verification: "API integration tests asserting status, problem type and that no row was stored"
+    - id: AC-3
+      statement: "Once reports from 3 distinct reporters fall within 24 hours, the link is disabled automatically: its redirect answers 410 and GET /api/v1/links/{code} shows status DISABLED"
+      verification: "API integration test driving three reporters through the endpoint; unit test of the takedown rule"
+    - id: AC-4
+      statement: "Repeated reports of the same link by the same reporter (same IPv4 address or IPv6 /64 network) count as 1 reporter"
+      verification: "API integration tests with repeated and same-network reports; unit test of the fingerprint"
+    - id: AC-5
+      statement: "Reports older than 24 hours do not count towards a takedown; a report exactly 24 hours old still does"
+      verification: Integration tests with stored reports on both sides of the window boundary
+    - id: AC-6
+      statement: "No client address is stored: a reporter is stored only as a 64-character keyed hash that differs from link to link"
+      verification: "Integration test inspecting the stored rows; unit tests of the fingerprint format and key dependence"
+  constraints:
+    - "No raw client address at rest; reporters are stored only as a keyed hash"
+    - "The hashing key comes from configuration or the environment, never from source code"
+    - "The takedown reuses the existing soft disable (LinkService.disable); no new link state"
+    - Existing endpoints and problem types keep their behaviour
+  assumptions:
+    - id: A-1
+      statement: "The client address is the servlet remote address; behind a reverse proxy the platform resolves forwarded headers (server.forward-headers-strategy)"
+      impact: MEDIUM
+      confirmed: false
+    - id: A-2
+      statement: "A distinct reporter is a distinct client network (IPv4 address or IPv6 /64); people behind one shared address count as one reporter"
+      impact: MEDIUM
+      confirmed: false
+    - id: A-3
+      statement: The reason is recorded for later review but every reason counts the same towards a takedown
+      impact: LOW
+      confirmed: false
+  outOfScope:
+    - "Moderator tooling: listing or reviewing reports, reinstating links"
+    - "Rate limiting and bot protection (gateway or edge layer)"
+    - Notifying link owners of reports or takedowns
+    - "Free-text report details (they would invite personal data)"
+    - Retention and purging of old reports
+  openQuestions: []
+  risks:
+    - id: R-1
+      description: "Coordinated false reports from several networks can disable a legitimate link, and only an operator can reinstate it"
+      severity: HIGH
+      mitigation: "Distinct networks required within a time window, IPv6 grouped per /64, every takedown logged and counted for Trust & Safety follow-up"
+    - id: R-2
+      description: "Without a configured key, or with different keys on different instances, a reporter counts again after a restart or on another instance"
+      severity: MEDIUM
+      mitigation: "Key documented as mandatory and identical on every instance in production; startup warning when it is missing"
+    - id: R-3
+      description: A leaked hashing key would allow re-identifying reporters by brute-forcing the IPv4 space
+      severity: MEDIUM
+      mitigation: "Key supplied through the environment; hashes scoped per link limit linkability"
+    - id: R-4
+      description: "Shared addresses (NAT, corporate proxies) undercount distinct reporters"
+      severity: LOW
+      mitigation: Documented approximation that errs on the side of not taking links down

@@ -1,0 +1,15 @@
+# Recorded output of the "where does this change start" reasoning step. The blast radius is then
+# computed deterministically from the real codebase by the impact analyzer.
+response:
+  rationale: >
+    Fingerprints are produced where clicks are recorded (ClickRecorder, ClickEvent), persisted by
+    ClickEventRepository into click_event, and aggregated by AnalyticsService into LinkStats, which the
+    stats API maps to LinkStatsResponse.
+  seeds:
+    - ClickRecorder
+    - ClickEvent
+    - ClickEventRepository
+    - AnalyticsService
+    - LinkStats
+    - LinkStatsResponse
+    - click_event

@@ -1,0 +1,11 @@
+# The product owner's answers to the clarification the first run pauses on:
+#   ./sdlc resume <run-id> --answers scenarios/ambiguous/answers.yaml
+# Q-1 and Q-2 were raised by requirement analysis; A-1 and AC-3 were added by the requirement-quality gate.
+reviewer: product-owner
+answers:
+  Q-1: per-link
+  Q-2: "410"
+  A-1: reject
+  AC-3: >-
+    Only following the link changes: GET /{code} answers 410 Gone and records no click.
+    GET /api/v1/links/{code} still returns the link, including its expiresAt.

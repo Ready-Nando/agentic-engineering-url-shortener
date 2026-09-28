@@ -1,0 +1,137 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+# Second attempt, after the policy denial was fed back as structured feedback.
+response:
+  summary: "Record a keyed, day-scoped visitor fingerprint with every click"
+  rationale: "Addresses the CMP-01 denial: only an HMAC of (day, address, user agent) is persisted, in a new nullable column added by a new migration (V1 stays untouched)."
+  declaredRisk: LOW
+  changes:
+    - op: CREATE
+      path: src/main/resources/db/migration/V2__add_visitor_hash_to_click_event.sql
+      contentFile: files/V2__add_visitor_hash_to_click_event.sql
+    - op: CREATE
+      path: src/main/java/com/example/shortener/analytics/VisitorFingerprint.java
+      contentFile: files/VisitorFingerprint.java
+    - op: EDIT
+      path: src/main/java/com/example/shortener/analytics/ClickEvent.java
+      find: |2
+         * @param referrerHost lower-cased host of the Referer header, or null when absent or unparseable
+         */
+        public record ClickEvent(long linkId, Instant occurredAt, @Nullable String referrerHost) {
+        }
+      replace: |2
+         * @param referrerHost lower-cased host of the Referer header, or null when absent or unparseable
+         * @param visitorHash  day-scoped keyed visitor fingerprint (see {@link VisitorFingerprint}), or null for
+         *                     clicks recorded before fingerprinting or without a known client address
+         */
+        public record ClickEvent(long linkId, Instant occurredAt, @Nullable String referrerHost, @Nullable String visitorHash) {
+
+            public ClickEvent(long linkId, Instant occurredAt, @Nullable String referrerHost) {
+                this(linkId, occurredAt, referrerHost, null);
+            }
+        }
+    - op: EDIT
+      path: src/main/java/com/example/shortener/analytics/ClickRecorder.java
+      find: |2
+        import java.time.Clock;
+      replace: |2
+        import java.time.Clock;
+        import java.time.Instant;
+        import java.time.LocalDate;
+        import java.time.ZoneOffset;
+    - op: EDIT
+      path: src/main/java/com/example/shortener/analytics/ClickRecorder.java
+      find: |2
+            private final ClickEventRepository clickEventRepository;
+            private final Clock clock;
+            private final Counter dropped;
+
+            public ClickRecorder(ClickEventRepository clickEventRepository, Clock clock, MeterRegistry meterRegistry) {
+                this.clickEventRepository = clickEventRepository;
+                this.clock = clock;
+      replace: |2
+            private final ClickEventRepository clickEventRepository;
+            private final VisitorFingerprint visitorFingerprint;
+            private final Clock clock;
+            private final Counter dropped;
+
+            public ClickRecorder(ClickEventRepository clickEventRepository, VisitorFingerprint visitorFingerprint, Clock clock,
+                                 MeterRegistry meterRegistry) {
+                this.clickEventRepository = clickEventRepository;
+                this.visitorFingerprint = visitorFingerprint;
+                this.clock = clock;
+    - op: EDIT
+      path: src/main/java/com/example/shortener/analytics/ClickRecorder.java
+      find: |2
+            public void record(ShortLink link, @Nullable String refererHeader) {
+                ClickEvent event = new ClickEvent(link.id(), clock.instant(), referrerHost(refererHeader));
+      replace: |2
+            /**
+             * @param clientAddress only used to derive the day-scoped visitor fingerprint; never stored
+             * @param userAgent     only used to derive the day-scoped visitor fingerprint; never stored
+             */
+            public void record(ShortLink link, @Nullable String refererHeader, @Nullable String clientAddress,
+                               @Nullable String userAgent) {
+                Instant now = clock.instant();
+                String visitor = visitorFingerprint.of(clientAddress, userAgent, LocalDate.ofInstant(now, ZoneOffset.UTC));
+                ClickEvent event = new ClickEvent(link.id(), now, referrerHost(refererHeader), visitor);
+    - op: EDIT
+      path: src/main/java/com/example/shortener/analytics/ClickEventRepository.java
+      find: |2
+                                INSERT INTO click_event (link_id, occurred_at, referrer_host)
+                                VALUES (:linkId, :occurredAt, :referrerHost)
+                                """)
+                        .param("linkId", event.linkId())
+                        .param("occurredAt", toUtc(event.occurredAt()))
+                        .param("referrerHost", event.referrerHost())
+      replace: |2
+                                INSERT INTO click_event (link_id, occurred_at, referrer_host, visitor_hash)
+                                VALUES (:linkId, :occurredAt, :referrerHost, :visitorHash)
+                                """)
+                        .param("linkId", event.linkId())
+                        .param("occurredAt", toUtc(event.occurredAt()))
+                        .param("referrerHost", event.referrerHost())
+                        .param("visitorHash", event.visitorHash())
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/api/RedirectController.java
+      find: |2
+        import com.example.shortener.link.ShortLink;
+        import java.net.URI;
+      replace: |2
+        import com.example.shortener.link.ShortLink;
+        import jakarta.servlet.http.HttpServletRequest;
+        import java.net.URI;
+    - op: EDIT
+      path: src/main/java/com/example/shortener/link/api/RedirectController.java
+      find: |2
+                    @RequestHeader(name = HttpHeaders.REFERER, required = false) @Nullable String referer,
+                    HttpMethod method) {
+                ShortLink link = linkService.resolve(code);
+                // Spring also routes HEAD here; link-preview bots and uptime checkers use it, and those are not clicks.
+                if (method == HttpMethod.GET) {
+                    clickRecorder.record(link, referer);
+                }
+      replace: |2
+                    @RequestHeader(name = HttpHeaders.REFERER, required = false) @Nullable String referer,
+                    @RequestHeader(name = HttpHeaders.USER_AGENT, required = false) @Nullable String userAgent,
+                    HttpMethod method,
+                    HttpServletRequest request) {
+                ShortLink link = linkService.resolve(code);
+                // Spring also routes HEAD here; link-preview bots and uptime checkers use it, and those are not clicks.
+                if (method == HttpMethod.GET) {
+                    // The direct peer address; behind a reverse proxy configure server.forward-headers-strategy.
+                    clickRecorder.record(link, referer, request.getRemoteAddr(), userAgent);
+                }
+    - op: EDIT
+      path: src/main/resources/application.yml
+      find: |2-
+          stats:
+            default-days: 7
+            max-days: 90
+      replace: |2-
+          stats:
+            default-days: 7
+            max-days: 90
+          analytics:
+            # HMAC key for visitor fingerprints. Supply it through the environment in production.
+            visitor-hash-secret: ${VISITOR_HASH_SECRET:}

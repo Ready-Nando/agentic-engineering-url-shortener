@@ -1,0 +1,31 @@
+id: ambiguous
+kind: AMBIGUOUS
+title: "Ambiguous: 'short links should expire'"
+description: |
+  A deliberately vague request. Requirement analysis asks about the expiry model and the response for
+  expired links, but states a high-impact assumption as settled and copies the vague wording into an
+  acceptance criterion; the requirement-quality gate turns both into questions of its own. The run
+  pauses for the product owner once the independent discovery work (codebase scan, baseline build) is
+  done. Resuming with answers.yaml re-analyses the requirement and continues through design sign-off,
+  migration approval, implementation, the real test suite, reviews and release sign-off, without
+  repeating the discovery work.
+targetModule: shortener
+requirement: |
+  Short links should expire. Expired links should be handled appropriately.
+reviewer:
+  name: scenario-reviewer
+  # Deliberately no CLARIFICATION rule: only the product owner can answer what the requirement leaves
+  # open, so the first run pauses (exit code 3) until `resume <run-id> --answers answers.yaml`.
+  decisions:
+    - match: { kind: GATE_APPROVAL, task: design }
+      decision: APPROVE
+      comment: "Additive nullable expires_at without backfill: existing links keep never expiring, as the product owner decided."
+    - match: { kind: CHANGE_APPROVAL, task: impl-storage, rules: [CC-02] }
+      decision: APPROVE
+      comment: "ADD COLUMN only, nullable, no default and no backfill; safe for existing rows."
+    - match: { kind: CHANGE_APPROVAL, task: impl-lifecycle, rules: [SEC-04] }
+      decision: APPROVE
+      comment: "The create API gains an optional expiresAt validated by the service; one new 400 mapping for invalid-expiry; link-gone keeps its status and type and is retitled 'Link gone' because it now also covers expired links."
+    - match: { kind: GATE_APPROVAL, task: release }
+      decision: APPROVE
+      comment: "Evidence reviewed: tests, acceptance coverage, security and API checks are green."

@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+# Launcher for the SDLC orchestrator CLI. Build first: ./mvnw -q -DskipTests package
+DIR=$(cd "$(dirname "$0")" && pwd)
+JAR="$DIR/orchestrator/target/sdlc-orchestrator.jar"
+if [ ! -f "$JAR" ]; then
+  echo "orchestrator jar not found; build it first: ./mvnw -q -DskipTests package" >&2
+  exit 1
+fi
+exec java -jar "$JAR" --repo "$DIR" "$@"

@@ -1,0 +1,25 @@
+# Build output
+target/
+
+# Workflow runs (workspaces, artifacts, audit logs) - regenerate with ./sdlc run <scenario>
+runs/
+
+# Local H2 database of the shortener
+data/
+
+# IDE and OS files
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Local tool state
+.claude/
+
+# Local environment and secrets
+.env
+.env.*
+*.pem
+*.p12
+*.jks
+*.keystore

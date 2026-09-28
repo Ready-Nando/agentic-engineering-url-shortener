@@ -1,0 +1,168 @@
+# Recorded reasoning output (replayed by the offline provider). The engine treats it exactly like
+# live model output: contract validation, change policy, approvals, gates and verification all apply.
+response:
+  summary: "Document abuse reporting, the takedown rule and the reporter key"
+  rationale: "The OpenAPI document is the public contract (OpenApiContractTest keeps it in sync with the controllers); operators need the key, the metrics and how to reinstate a link."
+  declaredRisk: LOW
+  changes:
+    - op: EDIT
+      path: src/main/resources/static/openapi.yaml
+      find: |2
+          - name: stats
+            description: Click statistics
+      replace: |2
+          - name: stats
+            description: Click statistics
+          - name: abuse
+            description: Report abusive links
+    - op: EDIT
+      path: src/main/resources/static/openapi.yaml
+      find: |2
+
+          /{code}:
+            get:
+              tags: [redirect]
+      replace: |2
+
+          /api/v1/links/{code}/reports:
+            post:
+              tags: [abuse]
+              operationId: reportLink
+              summary: Report a link for abuse
+              description: |
+                Anyone can report a link as spam, phishing, malware or other abuse. Once 3 distinct reporters have
+                reported a link within 24 hours, it is disabled automatically, exactly as by
+                `DELETE /api/v1/links/{code}`: redirects answer 410 Gone from then on.
+
+                A reporter is identified only by a keyed hash of their network (the IPv4 address or the IPv6 /64 prefix)
+                scoped to this link, and counts once however often they report: a repeated report replaces their earlier
+                one. Every accepted report is answered with 202 and no body, so the response reveals neither how many
+                reports a link has nor whether this report triggered the takedown.
+              parameters:
+                - $ref: '#/components/parameters/Code'
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      $ref: '#/components/schemas/AbuseReportRequest'
+                    example:
+                      reason: PHISHING
+              responses:
+                '202':
+                  description: Report accepted
+                '400':
+                  description: |
+                    Invalid request. Problem types: `validation-failed` (missing or unknown `reason`, with `errors`),
+                    `malformed-request`.
+                  content:
+                    application/problem+json:
+                      schema:
+                        oneOf:
+                          - $ref: '#/components/schemas/ValidationProblem'
+                          - $ref: '#/components/schemas/Problem'
+                '404':
+                  $ref: '#/components/responses/LinkNotFound'
+                '410':
+                  description: The link is already disabled (`link-gone`)
+                  content:
+                    application/problem+json:
+                      schema:
+                        $ref: '#/components/schemas/Problem'
+
+          /{code}:
+            get:
+              tags: [redirect]
+    - op: EDIT
+      path: src/main/resources/static/openapi.yaml
+      find: |2
+            Problem:
+              type: object
+              description: RFC 9457 problem details
+      replace: |2
+            AbuseReportRequest:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  enum: [SPAM, PHISHING, MALWARE, OTHER]
+                  description: Every reason counts the same towards an automatic takedown
+
+            Problem:
+              type: object
+              description: RFC 9457 problem details
+    - op: EDIT
+      path: README.md
+      find: |2
+        | `shortener.stats.max-days`                | `90`                    | Largest accepted statistics window                   |
+      replace: |2
+        | `shortener.stats.max-days`                | `90`                    | Largest accepted statistics window                   |
+        | `shortener.abuse.reporter-hash-secret`    | random per process      | Reporter fingerprint key; see *Abuse reports* below  |
+    - op: EDIT
+      path: README.md
+      find: |2
+        | `GET`    | `/api/v1/links/{code}/stats`      | Click statistics (`?days=1..90`, default 7)     |
+      replace: |2
+        | `GET`    | `/api/v1/links/{code}/stats`      | Click statistics (`?days=1..90`, default 7)     |
+        | `POST`   | `/api/v1/links/{code}/reports`    | Report abuse (202); may disable the link        |
+    - op: EDIT
+      path: README.md
+      find: |2
+        `shortener.links.created`, `shortener.redirects{outcome}` and `shortener.analytics.dropped`).
+      replace: |2
+        `shortener.links.created`, `shortener.redirects{outcome}`, `shortener.analytics.dropped`,
+        `shortener.abuse.reports{reason}` and `shortener.abuse.takedowns`).
+    - op: EDIT
+      path: README.md
+      find: |2
+        # Disable it; the redirect then answers 410 Gone
+      replace: |2
+        # Report it as phishing (202); three distinct reporters within 24 hours disable it
+        curl -i -X POST localhost:8080/api/v1/links/launch-2026/reports \
+          -H 'Content-Type: application/json' -d '{"reason": "PHISHING"}'
+
+        # Disable it; the redirect then answers 410 Gone
+    - op: EDIT
+      path: README.md
+      find: |2
+        | `link-gone`               | 410    | Redirect to a disabled link                                    |
+      replace: |2
+        | `link-gone`               | 410    | Redirect to, or abuse report of, a disabled link               |
+    - op: EDIT
+      path: README.md
+      find: "**Persistence.**"
+      replace: |2-
+        **Abuse reports and automatic takedown.** Anyone can report a link as `SPAM`, `PHISHING`, `MALWARE` or
+        `OTHER`. Once 3 distinct reporters have reported it within the last 24 hours, the link is disabled
+        exactly as by `DELETE`, so its redirect answers 410. A reporter is stored only as an HMAC-SHA256 of the
+        link id and the client's network: the IPv4 address, or the /64 prefix of an IPv6 address, because one
+        subscriber usually controls a whole /64. No address is stored, and the same person cannot be linked
+        across the links they report. `abuse_report` holds one row per link and reporter; a repeated report
+        refreshes that row, so every reporter counts once. Set the key with `ABUSE_REPORTER_HASH_SECRET`
+        (`shortener.abuse.reporter-hash-secret`), with the same value on every instance; without it a random
+        per-process key is used and reporters count again after a restart or on another instance. Behind a
+        reverse proxy, configure `server.forward-headers-strategy` so the client address is the real one.
+        Reports are always answered with 202 and no body, so they reveal neither how many reports a link has nor
+        how close it is to a takedown. Every takedown is logged at WARN and counted in
+        `shortener.abuse.takedowns`.
+
+        **Persistence.**
+    - op: EDIT
+      path: README.md
+      find: |2
+        - No rate limiting or abuse protection. That belongs in the gateway or edge layer in front of the
+          service.
+      replace: |2
+        - No rate limiting or bot protection, for abuse reports as for everything else. That belongs in the
+          gateway or edge layer in front of the service.
+    - op: EDIT
+      path: README.md
+      find: |2
+        - Links do not expire, visitors are not de-duplicated, and there is no abuse reporting.
+      replace: |2
+        - Links do not expire and visitors are not de-duplicated.
+        - Reporters who control several networks can still take a link down together, and there is no moderator
+          tooling: reinstating a link means setting its `status` back to `ACTIVE` and its `disabled_at` to
+          `NULL` in the database and deleting its `abuse_report` rows, otherwise the next report takes it down
+          again.
